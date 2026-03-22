@@ -9,7 +9,7 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIG
 # ------------------------- 
-SERIAL_PORT = "COM21"  
+SERIAL_PORT = "COM6"  
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
