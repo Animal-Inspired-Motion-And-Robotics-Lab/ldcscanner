@@ -24,7 +24,9 @@ if not CSV_FILE.lower().endswith(".csv"):
 csv_file = open(CSV_FILE, "a", newline="")
 csv_writer = csv.writer(csv_file)
 if os.path.getsize(CSV_FILE) == 0:
-    csv_writer.writerow(["timestamp", "sensor1", "sensor2", "sensor1_smooth", "sensor2_smooth", "sensor1_smooth_rot", "sensor2_smooth_rot", "rotation_angle_deg"])
+    csv_writer.writerow(["timestamp", "sensor1", "sensor2", "sensor1_smooth", 
+                         "sensor2_smooth", "sensor1_smooth_rot", "sensor2_smooth_rot", 
+                         "rotation_angle_deg"])
 
 # -------------------------
 # DATA STORAGE
@@ -36,6 +38,7 @@ sensor2 = deque(maxlen=MAX_POINTS)
 
 # control flags
 paused = False
+write_to_file_enabled = False
 
 # latest serial sample readout text
 latest_readout_text = "Incoming: waiting for data..."
@@ -114,7 +117,15 @@ def detect_opposing(dx, dy, threshold):
 # QT SETUP
 # -------------------------
 app = QtWidgets.QApplication([])
-win = pg.GraphicsLayoutWidget(show=True, title="Eddy Current Scanner")
+main_widget = QtWidgets.QWidget()
+main_widget.setWindowTitle("Eddy Current Scanner")
+main_layout = QtWidgets.QVBoxLayout(main_widget)
+main_layout.setContentsMargins(6, 6, 6, 6)
+main_layout.setSpacing(6)
+
+win = pg.GraphicsLayoutWidget()
+main_layout.addWidget(win, 1)
+
 win.setFocusPolicy(QtCore.Qt.StrongFocus)
 win.setFocus()
 
@@ -238,11 +249,36 @@ slider_layout.addWidget(readout_container)
 
 slider_layout.addStretch()
 
+# Write-to-file toggle (defaults OFF)
+write_toggle_button = QtWidgets.QPushButton("Write to File: OFF")
+write_toggle_button.setCheckable(True)
+write_toggle_button.setChecked(False)
+write_toggle_button.setMinimumWidth(140)
+def write_toggle_changed(checked):
+    global write_to_file_enabled
+    write_to_file_enabled = checked
+    write_toggle_button.setText("Write to File: ON" if checked else "Write to File: OFF")
+write_toggle_button.toggled.connect(write_toggle_changed)
+
+write_file_label = QtWidgets.QLabel(f"{os.path.basename(CSV_FILE)}")
+write_file_label.setAlignment(QtCore.Qt.AlignHCenter)
+write_file_label.setStyleSheet("font-size: 10px; color: #bbbbbb;")
+write_file_label.setToolTip(CSV_FILE)
+
+write_controls_layout = QtWidgets.QVBoxLayout()
+write_controls_layout.setContentsMargins(0, 0, 0, 0)
+write_controls_layout.setSpacing(2)
+write_controls_layout.addWidget(write_toggle_button)
+write_controls_layout.addWidget(write_file_label)
+
+write_controls_container = QtWidgets.QWidget()
+write_controls_container.setLayout(write_controls_layout)
+slider_layout.addWidget(write_controls_container)
+
 slider_container = QtWidgets.QWidget()
 slider_container.setLayout(slider_layout)
-proxy = QtWidgets.QGraphicsProxyWidget()
-proxy.setWidget(slider_container)
-win.addItem(proxy, row=2, col=0, colspan=2)
+main_layout.addWidget(slider_container, 0)
+main_widget.show()
 
 # -------------------------
 # KEY HANDLER
@@ -264,6 +300,9 @@ def keyPressEvent(event):
         if paused:
             ser.reset_input_buffer()
         print("Paused" if paused else "Resumed")
+    elif event.key() == QtCore.Qt.Key_F:
+        write_toggle_button.setChecked(not write_toggle_button.isChecked())
+        print("CSV write ON" if write_toggle_button.isChecked() else "CSV write OFF")
 
 win.keyPressEvent = keyPressEvent
 
@@ -271,7 +310,7 @@ win.keyPressEvent = keyPressEvent
 # SERIAL READ
 # -------------------------
 def read_serial():
-    global latest_readout_text
+    global latest_readout_text, write_to_file_enabled
     if paused:
         ser.reset_input_buffer()
         return
@@ -294,8 +333,9 @@ def read_serial():
             rot_cx, rot_cy, rot_sx, rot_sy = get_rotation_params(y1_plot, y2_plot)
             s1_rot, s2_rot = rotate_xy_arrays(np.array([s1_smooth]), np.array([s2_smooth]), ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
 
-            csv_writer.writerow([t, s1, s2, s1_smooth, s2_smooth, float(s1_rot[0]), float(s2_rot[0]), ROTATION_ANGLE])
-            csv_file.flush()
+            if write_to_file_enabled:
+                csv_writer.writerow([t, s1, s2, s1_smooth, s2_smooth, float(s1_rot[0]), float(s2_rot[0]), ROTATION_ANGLE])
+                csv_file.flush()
             latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f}"
         except:
             pass
