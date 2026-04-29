@@ -1,5 +1,7 @@
 import serial
 import numpy as np
+import csv
+import os
 from collections import deque
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
@@ -9,9 +11,20 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIG
 # ------------------------- 
-SERIAL_PORT = "COM6"  
+SERIAL_PORT = "COM7"   
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
+
+CSV_FILE = input("Enter CSV filename (default: serial_data_log.csv): ").strip()
+if not CSV_FILE:
+    CSV_FILE = "serial_data_log.csv"
+if not CSV_FILE.lower().endswith(".csv"):
+    CSV_FILE += ".csv"
+
+csv_file = open(CSV_FILE, "a", newline="")
+csv_writer = csv.writer(csv_file)
+if os.path.getsize(CSV_FILE) == 0:
+    csv_writer.writerow(["timestamp", "sensor1", "sensor2", "sensor1_smooth", "sensor2_smooth"])
 
 # -------------------------
 # DATA STORAGE
@@ -23,6 +36,9 @@ sensor2 = deque(maxlen=MAX_POINTS)
 
 # control flags
 paused = False
+
+# latest serial sample readout text
+latest_readout_text = "Incoming: waiting for data..."
 
 # XY plot tracking
 xy_start_index = 0
@@ -41,6 +57,13 @@ def moving_average(data, window):
         return np.array(data)
     kernel = np.ones(window) / window
     return np.convolve(data, kernel, mode="valid")
+
+def latest_smoothed_value(data, window):
+    if not data:
+        return np.nan
+    if len(data) < window:
+        return float(data[-1])
+    return float(np.mean(list(data)[-window:]))
 
 # -------------------------
 # EVENT DETECTION
@@ -135,6 +158,15 @@ threshold_slider.valueChanged.connect(threshold_changed)
 slider_layout.addWidget(threshold_label)
 slider_layout.addWidget(threshold_slider)
 
+slider_layout.addSpacing(30)
+
+# Live incoming serial readout
+readout_label = QtWidgets.QLabel(latest_readout_text)
+readout_label.setMinimumWidth(320)
+slider_layout.addWidget(readout_label)
+
+slider_layout.addStretch()
+
 slider_container = QtWidgets.QWidget()
 slider_container.setLayout(slider_layout)
 proxy = QtWidgets.QGraphicsProxyWidget()
@@ -166,6 +198,7 @@ win.keyPressEvent = keyPressEvent
 # SERIAL READ
 # -------------------------
 def read_serial():
+    global latest_readout_text
     if paused:
         ser.reset_input_buffer()
         return
@@ -176,6 +209,12 @@ def read_serial():
             timestamps.append(t)
             sensor1.append(s1)
             sensor2.append(s2)
+
+            s1_smooth = latest_smoothed_value(sensor1, SMOOTH_WINDOW)
+            s2_smooth = latest_smoothed_value(sensor2, SMOOTH_WINDOW)
+            csv_writer.writerow([t, s1, s2, s1_smooth, s2_smooth])
+            csv_file.flush()
+            latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f}"
         except:
             pass
 
@@ -184,6 +223,8 @@ def read_serial():
 # -------------------------
 def update():
     read_serial()
+    readout_label.setText(latest_readout_text)
+
     x = np.array(timestamps)
     y1 = np.array(sensor1)
     y2 = np.array(sensor2)
@@ -258,5 +299,10 @@ def update():
 timer = QtCore.QTimer()
 timer.timeout.connect(update)
 timer.start(50)
+
+def close_resources():
+    csv_file.close()
+
+app.aboutToQuit.connect(close_resources)
 
 app.exec()
