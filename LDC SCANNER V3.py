@@ -2,6 +2,7 @@ import serial
 import numpy as np
 import csv
 import os
+import time
 from collections import deque
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
@@ -11,7 +12,7 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIGS
 # ------------------------- 
-SERIAL_PORT = "COM6"   
+SERIAL_PORT = "COM7"   
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
@@ -43,17 +44,27 @@ write_to_file_enabled = False
 # latest serial sample readout text
 latest_readout_text = "Incoming: waiting for data..."
 latest_average_text = "Average: waiting for data..."
+last_average_update_time = 0.0
 
 # XY plot tracking
 xy_start_index = 0
 
 # adjustable parameters
 SMOOTH_WINDOW = 10
-THRESHOLD = 0.005
-DISTANCE_LABEL_THRESHOLD = 5
-CRACK_CONSTANT = 0.9  # multiplier for crack depth estimate
 ROTATION_ANGLE = 0.0  # degrees; applied to XY phase-space plot
 RECENT_FADE_POINTS = 100
+AVERAGE_UPDATE_INTERVAL_SEC = 5.0
+PEAK_SEARCH_WINDOW = 50  # number of recent smoothed points to scan for peaks
+PEAK_SLOPE_WINDOW = 5    # consecutive points that must be rising before AND falling after the peak
+PEAK_MIN_PROMINENCE = 0.1  # minimum height of peak above both flanks
+PEAK_HIGHLIGHT_FRAMES = 30  # how many update frames (~1.5 s) to keep peak green
+PEAK_VALLEY_WINDOW = 25  # max points to search on each side of peak for local troughs
+
+# last detected peak height (persists until a new peak is found)
+last_peak_s2 = float('nan')
+peak_highlight_frames = 0
+peak_abs_left = -1   # abs index in y2_rot of the peak's left flank
+peak_abs_right = -1  # abs index in y2_rot of the peak's right flank
 
 # -------------------------
 # SMOOTHING FUNCTION
@@ -63,6 +74,42 @@ def moving_average(data, window):
         return np.array(data)
     kernel = np.ones(window) / window
     return np.convolve(data, kernel, mode="valid")
+
+def detect_last_peak(data):
+    """Return the most recent qualified peak as (height, peak_i, left_i, right_i).
+
+    A qualified peak at index i must have:
+      - PEAK_SLOPE_WINDOW consecutive rising points leading up to it
+      - PEAK_SLOPE_WINDOW consecutive falling points after it
+            - height above both side troughs by at least PEAK_MIN_PROMINENCE
+    """
+    w = PEAK_SLOPE_WINDOW
+    for i in range(len(data) - w - 1, w - 1, -1):
+        # Check rising flank: all points in [i-w .. i] must be strictly increasing
+        rising = all(data[i - w + k] < data[i - w + k + 1] for k in range(w))
+        # Check falling flank: all points in [i .. i+w] must be strictly decreasing
+        falling = all(data[i + k] > data[i + k + 1] for k in range(w))
+        if not (rising and falling):
+            continue
+        # Find local troughs (valleys) around this peak so event span follows full shape.
+        left_search_start = max(0, i - PEAK_VALLEY_WINDOW)
+        right_search_end = min(len(data), i + PEAK_VALLEY_WINDOW + 1)
+        left_segment = data[left_search_start:i + 1]
+        right_segment = data[i:right_search_end]
+        if len(left_segment) == 0 or len(right_segment) == 0:
+            continue
+        left_i = left_search_start + int(np.argmin(left_segment))
+        right_i = i + int(np.argmin(right_segment))
+        left_valley = float(data[left_i])
+        right_valley = float(data[right_i])
+
+        # Prominence gate: peak must exceed both side valleys by threshold.
+        if data[i] - left_valley >= PEAK_MIN_PROMINENCE and data[i] - right_valley >= PEAK_MIN_PROMINENCE:
+            # Report full event excursion as max-min over the detected peak span.
+            event_segment = data[left_i:right_i + 1]
+            height = float(np.max(event_segment) - np.min(event_segment))
+            return height, i, left_i, right_i
+    return float('nan'), None, None, None
 
 def latest_smoothed_value(data, window):
     if not data:
@@ -103,15 +150,43 @@ def get_rotation_params(y1_plot, y2_plot):
     return 0.0, 0.0, 1.0, 1.0
 
 class ResettableDial(QtWidgets.QDial):
+    """Dial that uses relative drag instead of click-to-jump, with scroll-wheel fine control."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drag_start_y = None
+        self._drag_start_val = None
+
     def mouseDoubleClickEvent(self, event):
         self.setValue(0)
-        super().mouseDoubleClickEvent(event)
+        # don't call super() so it doesn't also jump to clicked position
 
-# -------------------------
-# EVENT DETECTION
-# -------------------------
-def detect_opposing(dx, dy, threshold):
-    return (dx < -threshold) and (dy > threshold)
+    def mousePressEvent(self, event):
+        # Record start position; do NOT jump to clicked angle
+        self._drag_start_y = event.y()
+        self._drag_start_val = self.value()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is None:
+            return
+        # 1 step per pixel of vertical drag (1 step = 0.1°)
+        delta = self._drag_start_y - event.y()
+        new_val = self._drag_start_val + delta
+        new_val = max(self.minimum(), min(self.maximum(), new_val))
+        self.setValue(new_val)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_y = None
+        self._drag_start_val = None
+        event.accept()
+
+    def wheelEvent(self, event):
+        # Scroll wheel: 1 step (0.1°) per wheel click
+        delta = event.angleDelta().y()
+        step = 1 if delta > 0 else -1
+        self.setValue(self.value() + step)
+        event.accept()
 
 # -------------------------
 # QT SETUP
@@ -173,7 +248,6 @@ xy_curve = plot_xy.plot(pen='r')
 recent_segment_curves = []
 for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
     recent_segment_curves.append(plot_xy.plot(pen=pg.mkPen((255, 0, 0), width=3)))
-event_curve = plot_xy.plot(pen=pg.mkPen(color=(0,255,0,128), width=3))  # semi-transparent green
 
 # -------------------------
 # SLIDERS
@@ -181,7 +255,7 @@ event_curve = plot_xy.plot(pen=pg.mkPen(color=(0,255,0,128), width=3))  # semi-t
 win.nextRow()
 slider_layout = QtWidgets.QHBoxLayout()
 
-# Smooth window
+# Smooth window + min peak height stacked vertically
 smooth_label = QtWidgets.QLabel(f"Smooth window: {SMOOTH_WINDOW}")
 smooth_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
 smooth_slider.setMinimum(1)
@@ -192,41 +266,101 @@ def smooth_changed(value):
     SMOOTH_WINDOW = int(value)
     smooth_label.setText(f"Smooth window: {SMOOTH_WINDOW}")
 smooth_slider.valueChanged.connect(smooth_changed)
-slider_layout.addWidget(smooth_label)
-slider_layout.addWidget(smooth_slider)
 
-slider_layout.addSpacing(30)
+# Min peak height slider: 0.001 – 1.0 in steps of 0.001 (stored as int * 1000)
+_PEAK_PROM_SCALE = 1000
+peak_prom_label = QtWidgets.QLabel(f"Min peak height: {PEAK_MIN_PROMINENCE:.3f} µH")
+peak_prom_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+peak_prom_slider.setMinimum(1)
+peak_prom_slider.setMaximum(250)
+peak_prom_slider.setValue(int(PEAK_MIN_PROMINENCE * _PEAK_PROM_SCALE))
+def peak_prom_changed(value):
+    global PEAK_MIN_PROMINENCE
+    PEAK_MIN_PROMINENCE = value / _PEAK_PROM_SCALE
+    peak_prom_label.setText(f"Min peak height: {PEAK_MIN_PROMINENCE:.3f} µH")
+peak_prom_slider.valueChanged.connect(peak_prom_changed)
 
-# Threshold slider 0.00001 -> 0.01
-threshold_label = QtWidgets.QLabel(f"Event threshold: {THRESHOLD:.5f}")
-threshold_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-threshold_slider.setMinimum(1)       # corresponds to 0.00001
-threshold_slider.setMaximum(1000)    # corresponds to 0.01
-threshold_slider.setValue(int(THRESHOLD * 100000))
-def threshold_changed(value):
-    global THRESHOLD
-    THRESHOLD = value / 100000.0
-    threshold_label.setText(f"Event threshold: {THRESHOLD:.5f}")
-threshold_slider.valueChanged.connect(threshold_changed)
-slider_layout.addWidget(threshold_label)
-slider_layout.addWidget(threshold_slider)
+smooth_row = QtWidgets.QHBoxLayout()
+smooth_row.setContentsMargins(0, 0, 0, 0)
+smooth_row.addWidget(smooth_label)
+smooth_row.addWidget(smooth_slider)
+
+peak_prom_row = QtWidgets.QHBoxLayout()
+peak_prom_row.setContentsMargins(0, 0, 0, 0)
+peak_prom_row.addWidget(peak_prom_label)
+peak_prom_row.addWidget(peak_prom_slider)
+
+sliders_left_layout = QtWidgets.QVBoxLayout()
+sliders_left_layout.setContentsMargins(0, 0, 0, 0)
+sliders_left_layout.setSpacing(2)
+sliders_left_layout.addLayout(smooth_row)
+sliders_left_layout.addLayout(peak_prom_row)
+
+sliders_left_container = QtWidgets.QWidget()
+sliders_left_container.setLayout(sliders_left_layout)
+slider_layout.addWidget(sliders_left_container)
+slider_layout.addSpacing(10)
+
+peak_label = QtWidgets.QLabel("Peak: --")
+peak_label.setMinimumWidth(220)
+slider_layout.addWidget(peak_label)
 
 slider_layout.addSpacing(30)
 
 # Rotation dial
-rotation_label = QtWidgets.QLabel(f"Rotation: 0.0°")
+rotation_label = QtWidgets.QLabel("Rotation:")
 rotation_dial = ResettableDial()
 rotation_dial.setMinimum(-1800)
 rotation_dial.setMaximum(1800)
 rotation_dial.setValue(0)
 rotation_dial.setNotchesVisible(True)
 rotation_dial.setFixedSize(60, 60)
+rotation_dial.setToolTip("Drag up/down to rotate · Scroll wheel for fine steps · Double-click to reset")
+
+rotation_spinbox = QtWidgets.QDoubleSpinBox()
+rotation_spinbox.setMinimum(-180.0)
+rotation_spinbox.setMaximum(180.0)
+rotation_spinbox.setSingleStep(0.1)
+rotation_spinbox.setDecimals(1)
+rotation_spinbox.setSuffix("°")
+rotation_spinbox.setValue(0.0)
+rotation_spinbox.setFixedWidth(80)
+rotation_spinbox.setToolTip("Type an exact rotation angle")
+
+_rotation_updating = False
 def rotation_changed(value):
-    global ROTATION_ANGLE
+    global ROTATION_ANGLE, _rotation_updating
+    if _rotation_updating:
+        return
+    _rotation_updating = True
     ROTATION_ANGLE = value / 10.0
     rotation_label.setText(f"Rotation: {ROTATION_ANGLE:.1f}°")
+    rotation_spinbox.setValue(ROTATION_ANGLE)
+    _rotation_updating = False
+
+def rotation_spinbox_changed(value):
+    global ROTATION_ANGLE, _rotation_updating
+    if _rotation_updating:
+        return
+    _rotation_updating = True
+    ROTATION_ANGLE = value
+    rotation_label.setText(f"Rotation: {ROTATION_ANGLE:.1f}°")
+    rotation_dial.setValue(int(round(value * 10)))
+    _rotation_updating = False
+
 rotation_dial.valueChanged.connect(rotation_changed)
-slider_layout.addWidget(rotation_label)
+rotation_spinbox.valueChanged.connect(rotation_spinbox_changed)
+
+rotation_label.setText("Rotation: 0.0°")
+
+rotation_widget = QtWidgets.QWidget()
+rotation_layout = QtWidgets.QVBoxLayout(rotation_widget)
+rotation_layout.setContentsMargins(0, 0, 0, 0)
+rotation_layout.setSpacing(2)
+rotation_layout.addWidget(rotation_label)
+rotation_layout.addWidget(rotation_spinbox)
+
+slider_layout.addWidget(rotation_widget)
 slider_layout.addWidget(rotation_dial)
 
 slider_layout.addSpacing(30)
@@ -290,10 +424,6 @@ def keyPressEvent(event):
         xy_curve.clear()
         for seg_curve in recent_segment_curves:
             seg_curve.setData([], [])
-        event_curve.clear()
-        for item in plot_xy.items[:]:
-            if isinstance(item, pg.TextItem):
-                plot_xy.removeItem(item)
         plot_xy.enableAutoRange()
     elif event.key() == QtCore.Qt.Key_P:
         paused = not paused
@@ -351,16 +481,23 @@ def update():
     y1 = np.array(sensor1)
     y2 = np.array(sensor2)
 
-    avg_count = min(RECENT_FADE_POINTS, len(y1))
-    if avg_count > 0:
-        avg_s1 = float(np.mean(y1[-avg_count:]))
-        avg_s2 = float(np.mean(y2[-avg_count:]))
-        average_label.setText(f"Avg last {avg_count}: s1={avg_s1:.6f} | s2={avg_s2:.6f}")
-    else:
-        average_label.setText(f"Avg last {RECENT_FADE_POINTS}: waiting for data...")
+    global latest_average_text, last_average_update_time
+    now = time.monotonic()
+    if now - last_average_update_time >= AVERAGE_UPDATE_INTERVAL_SEC:
+        avg_count = min(RECENT_FADE_POINTS, len(y1))
+        if avg_count > 0:
+            avg_s1 = float(np.mean(y1[-avg_count:]))
+            avg_s2 = float(np.mean(y2[-avg_count:]))
+            latest_average_text = f"Avg last {avg_count}: s1={avg_s1:.6f} | s2={avg_s2:.6f}"
+        else:
+            latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
+        last_average_update_time = now
+    average_label.setText(latest_average_text)
 
     if len(x) == 0:
         return
+
+    global last_peak_s2, peak_highlight_frames, peak_abs_left, peak_abs_right
 
     # smoothing
     y1_s = moving_average(y1, SMOOTH_WINDOW)
@@ -392,6 +529,18 @@ def update():
     y1_rot, y2_rot = rotate_xy_arrays(y1_plot, y2_plot, ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
     xy_curve.setData(y1_rot, y2_rot)
 
+    # peak detection: look for upward peaks in the vertical axis (y2_rot) of phase-space
+    if len(y2_rot) >= 3:
+        slice_start = max(0, len(y2_rot) - PEAK_SEARCH_WINDOW)
+        pk2, peak_i, peak_left_i, peak_right_i = detect_last_peak(y2_rot[-PEAK_SEARCH_WINDOW:])
+        if not np.isnan(pk2):
+            last_peak_s2 = pk2
+            peak_abs_left = slice_start + peak_left_i
+            peak_abs_right = slice_start + peak_right_i
+            peak_highlight_frames = PEAK_HIGHLIGHT_FRAMES
+    pk_str = f"{last_peak_s2:.6f}" if not np.isnan(last_peak_s2) else "--"
+    peak_label.setText(f"Peak (vertical): {pk_str}")
+
     # Highlight most recent trajectory with red -> white segment gradient.
     tail_count = min(RECENT_FADE_POINTS, len(y1_rot))
     if tail_count > 1:
@@ -399,62 +548,26 @@ def update():
         tail_y = y2_rot[-tail_count:]
         seg_count = tail_count - 1
         shades = np.linspace(0, 255, seg_count).astype(int)
+        tail_start_abs = len(y2_rot) - tail_count
         for i in range(seg_count):
             seg_curve = recent_segment_curves[i]
-            seg_curve.setPen(pg.mkPen((255, int(shades[i]), int(shades[i]), 255), width=3))
+            seg_abs_start = tail_start_abs + i
+            seg_abs_end = tail_start_abs + i + 1
+            if (peak_highlight_frames > 0
+                    and peak_abs_left >= 0
+                    and seg_abs_end >= peak_abs_left
+                    and seg_abs_start <= peak_abs_right):
+                seg_curve.setPen(pg.mkPen((0, 255, 0, 255), width=3))
+            else:
+                seg_curve.setPen(pg.mkPen((255, int(shades[i]), int(shades[i]), 255), width=3))
             seg_curve.setData([tail_x[i], tail_x[i + 1]], [tail_y[i], tail_y[i + 1]])
         for i in range(seg_count, len(recent_segment_curves)):
             recent_segment_curves[i].setData([], [])
     else:
         for seg_curve in recent_segment_curves:
             seg_curve.setData([], [])
-
-    # event highlighting + distance calculation
-    event_x = []
-    event_y = []
-    current_event_dist = 0
-    event_active = False
-
-    for i in range(max(1, xy_offset), len(y1_s)):
-        dx = y1_s[i] - y1_s[i-1]
-        dy = y2_s[i] - y2_s[i-1]
-        if detect_opposing(dx, dy, THRESHOLD):
-            event_x.extend([y1_s[i-1], y1_s[i], np.nan])
-            event_y.extend([y2_s[i-1], y2_s[i], np.nan])
-            if not event_active:
-                current_event_dist = 0
-                event_active = True
-            current_event_dist += np.sqrt(dx**2 + dy**2)
-        else:
-            if event_active:
-                if current_event_dist > DISTANCE_LABEL_THRESHOLD:
-                    crack_estimate = current_event_dist * CRACK_CONSTANT
-                    label_text = f"Dist={current_event_dist:.2f}\nCrack={crack_estimate:.2f} thou"
-                    label = pg.TextItem(text=label_text, color='w', anchor=(0.5, -0.5))
-                    lx, ly = rotate_xy_arrays(np.array([y1_s[i-1]]), np.array([y2_s[i-1]]), ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
-                    label.setPos(float(lx[0]), float(ly[0]))
-                    plot_xy.addItem(label)
-                event_active = False
-
-    # ongoing event at end
-    if event_active and current_event_dist > DISTANCE_LABEL_THRESHOLD:
-        crack_estimate = current_event_dist * CRACK_CONSTANT
-        label_text = f"Dist={current_event_dist:.2f}\nCrack={crack_estimate:.2f} thou"
-        label = pg.TextItem(text=label_text, color='w', anchor=(0.5, -0.5))
-        lx, ly = rotate_xy_arrays(np.array([y1_s[-1]]), np.array([y2_s[-1]]), ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
-        label.setPos(float(lx[0]), float(ly[0]))
-        plot_xy.addItem(label)
-
-    if event_x:
-        ex = np.array(event_x, dtype=float)
-        ey = np.array(event_y, dtype=float)
-        valid = ~np.isnan(ex) & ~np.isnan(ey)
-        rx, ry = rotate_xy_arrays(ex[valid], ey[valid], ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
-        ex[valid] = rx
-        ey[valid] = ry
-        event_curve.setData(ex.tolist(), ey.tolist())
-    else:
-        event_curve.setData([], [])
+    if peak_highlight_frames > 0:
+        peak_highlight_frames -= 1
 
 # -------------------------
 # TIMER
