@@ -153,7 +153,7 @@ class ResettableDial(QtWidgets.QDial):
     """Dial that uses relative drag instead of click-to-jump, with scroll-wheel fine control."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._drag_start_y = None
+        self._drag_start_x = None
         self._drag_start_val = None
 
     def mouseDoubleClickEvent(self, event):
@@ -162,22 +162,22 @@ class ResettableDial(QtWidgets.QDial):
 
     def mousePressEvent(self, event):
         # Record start position; do NOT jump to clicked angle
-        self._drag_start_y = event.y()
+        self._drag_start_x = event.x()
         self._drag_start_val = self.value()
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if self._drag_start_y is None:
+        if self._drag_start_x is None:
             return
-        # 1 step per pixel of vertical drag (1 step = 0.1°)
-        delta = self._drag_start_y - event.y()
+        # 1 step per pixel of horizontal drag (1 step = 0.1°)
+        delta = event.x() - self._drag_start_x
         new_val = self._drag_start_val + delta
         new_val = max(self.minimum(), min(self.maximum(), new_val))
         self.setValue(new_val)
         event.accept()
 
     def mouseReleaseEvent(self, event):
-        self._drag_start_y = None
+        self._drag_start_x = None
         self._drag_start_val = None
         event.accept()
 
