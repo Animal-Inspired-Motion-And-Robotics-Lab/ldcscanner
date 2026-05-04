@@ -8,12 +8,21 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from scipy.signal import find_peaks
 
-
 # Runtime toggles for faster execution.
 FAST_MODE = False
 FRAME_STEP = 5 if FAST_MODE else 1
 SHOW_PLOTS = False if FAST_MODE else True
 SAVE_GIFS = True
+
+
+def create_run_output_dir(base_dir="outputs"):
+    """
+    Create and return a unique timestamped directory for one script run.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(base_dir) / f"run_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 def load_csv_files(file_paths):
     """
@@ -416,6 +425,131 @@ def fmt_snr_db(value):
     return f"{value:.1f} dB"
 
 
+def parse_peak_snr_series(peak_snr_db_values):
+    """
+    Parse semicolon-separated per-peak SNR dB values into finite floats.
+    """
+    if pd.isna(peak_snr_db_values):
+        return []
+
+    values = []
+    for token in str(peak_snr_db_values).split(";"):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    return values
+
+
+def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plots=True):
+    """
+    Create static charts that compare SNR differences across sensor runs.
+
+    Outputs:
+      - Overview PNG with ranking, delta-to-best, and signal-vs-noise scatter.
+      - Peak-level SNR strip plot PNG (if peak SNR values are available).
+    """
+    if snr_df is None or snr_df.empty:
+        print("No SNR data available for visualization.")
+        return []
+
+    plot_outputs = []
+    snr_plot_df = snr_df.copy().sort_values(by="snr_db", ascending=False).reset_index(drop=True)
+
+    rank = np.arange(1, len(snr_plot_df) + 1)
+    best_snr = float(snr_plot_df.loc[0, "snr_db"])
+    snr_plot_df["delta_to_best_db"] = best_snr - snr_plot_df["snr_db"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    ax_rank = axes[0, 0]
+    ax_delta = axes[0, 1]
+    ax_signal_noise = axes[1, 0]
+    ax_peaks = axes[1, 1]
+
+    bar_colors = plt.cm.Blues(np.linspace(0.45, 0.9, len(snr_plot_df)))
+    ax_rank.barh(snr_plot_df["file"], snr_plot_df["snr_db"], color=bar_colors)
+    ax_rank.invert_yaxis()
+    ax_rank.set_title("Run Ranking by Crack SNR")
+    ax_rank.set_xlabel("SNR (dB)")
+    ax_rank.grid(axis="x", alpha=0.25)
+    for y_idx, value in enumerate(snr_plot_df["snr_db"]):
+        ax_rank.text(value, y_idx, f" {value:.1f}", va="center", ha="left", fontsize=8)
+
+    ax_delta.plot(rank, snr_plot_df["snr_db"], marker="o", linewidth=2, color="#1f77b4", label="SNR (dB)")
+    ax_delta.bar(rank, snr_plot_df["delta_to_best_db"], alpha=0.25, color="#ff7f0e", label="Delta to best (dB)")
+    ax_delta.set_xticks(rank)
+    ax_delta.set_xticklabels([f"#{i}" for i in rank])
+    ax_delta.set_title("SNR Spread Across Runs")
+    ax_delta.set_xlabel("Rank (best to worst)")
+    ax_delta.set_ylabel("dB")
+    ax_delta.grid(alpha=0.25)
+    ax_delta.legend(loc="best")
+
+    scatter = ax_signal_noise.scatter(
+        snr_plot_df["noise_sigma"],
+        snr_plot_df["signal_amplitude"],
+        c=snr_plot_df["snr_db"],
+        cmap="viridis",
+        s=70,
+        alpha=0.9,
+    )
+    ax_signal_noise.set_title("Signal vs Noise by Run")
+    ax_signal_noise.set_xlabel("Noise sigma")
+    ax_signal_noise.set_ylabel("Signal amplitude")
+    ax_signal_noise.grid(alpha=0.25)
+    for _, row in snr_plot_df.iterrows():
+        ax_signal_noise.annotate(row["file"], (row["noise_sigma"], row["signal_amplitude"]), fontsize=7)
+    fig.colorbar(scatter, ax=ax_signal_noise, label="SNR (dB)")
+
+    peak_points = []
+    for i, (_, row) in enumerate(snr_plot_df.iterrows(), start=1):
+        peak_snr_values = parse_peak_snr_series(row.get("peak_snr_db_values", ""))
+        for peak_value in peak_snr_values:
+            peak_points.append((i, peak_value, row["file"]))
+
+    if peak_points:
+        x_vals = np.array([pt[0] for pt in peak_points], dtype=float)
+        y_vals = np.array([pt[1] for pt in peak_points], dtype=float)
+        jitter = np.linspace(-0.12, 0.12, len(x_vals)) if len(x_vals) > 1 else np.array([0.0])
+        ax_peaks.scatter(x_vals + jitter, y_vals, color="#2ca02c", alpha=0.75, s=28)
+
+        for i, file_name in enumerate(snr_plot_df["file"], start=1):
+            run_peak_values = [pt[1] for pt in peak_points if pt[2] == file_name]
+            if run_peak_values:
+                ax_peaks.hlines(np.median(run_peak_values), i - 0.2, i + 0.2, colors="#d62728", linewidth=2)
+
+        ax_peaks.set_xticks(rank)
+        ax_peaks.set_xticklabels([f"#{i}" for i in rank])
+        ax_peaks.set_title("Per-Peak SNR Distribution by Run")
+        ax_peaks.set_xlabel("Run rank")
+        ax_peaks.set_ylabel("Peak SNR (dB)")
+        ax_peaks.grid(alpha=0.25)
+    else:
+        ax_peaks.text(0.5, 0.5, "No finite peak SNR values available", ha="center", va="center")
+        ax_peaks.set_axis_off()
+
+    plt.tight_layout()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if save_plots:
+        overview_path = Path(output_dir) / f"snr_visual_summary_{timestamp}.png"
+        fig.savefig(overview_path, dpi=200)
+        plot_outputs.append(str(overview_path))
+        print(f"Saved SNR visual summary: {overview_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return plot_outputs
+
+
 def create_overlay_animation(
     dataframes,
     x_col="sensor1_smooth_rot",
@@ -424,6 +558,7 @@ def create_overlay_animation(
     interval=30,
     tail_length=100,
     frame_step=1,
+    output_dir=".",
     save_gif=True,
     show_plot=True,
 ):
@@ -458,9 +593,14 @@ def create_overlay_animation(
     ax.set_ylabel("Inductance (normalized)")
 
     x_pad = (global_x_max - global_x_min) * 0.05 if global_x_max > global_x_min else 1
-    y_pad = (global_y_max - global_y_min) * 0.05 if global_y_max > global_y_min else 1
+    y_range = (global_y_max - global_y_min) if global_y_max > global_y_min else 1
+    y_pad_bottom = y_range * 0.05
+    base_y_pad_top = y_range * 0.05
+    base_y_span = y_range + y_pad_bottom + base_y_pad_top
+    target_y_span = base_y_span * 1.25
+    y_pad_top = max(base_y_pad_top, target_y_span - (y_range + y_pad_bottom))
     ax.set_xlim(global_x_min - x_pad, global_x_max + x_pad)
-    ax.set_ylim(global_y_min - y_pad, global_y_max + y_pad)
+    ax.set_ylim(global_y_min - y_pad_bottom, global_y_max + y_pad_top)
 
     color_map = plt.get_cmap("tab10", len(prepared))
     artists = []
@@ -593,10 +733,10 @@ def create_overlay_animation(
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if save_gif:
-        gif_filename = f"overlay_animation_{timestamp}.gif"
+        gif_path = Path(output_dir) / f"overlay_animation_{timestamp}.gif"
         fps = max(1, int(round(1000 / interval / max(1, frame_step))))
-        anim.save(gif_filename, writer="pillow", fps=fps)
-        print(f"Saved animation GIF: {gif_filename}")
+        anim.save(str(gif_path), writer="pillow", fps=fps)
+        print(f"Saved animation GIF: {gif_path}")
 
     # Keep a reference alive for the life of the figure.
     fig._overlay_anim = anim
@@ -616,6 +756,7 @@ def create_stacked_animation(
     interval=30,
     tail_length=100,
     frame_step=1,
+    output_dir=".",
     save_gif=True,
     show_plot=True,
 ):
@@ -639,6 +780,7 @@ def create_stacked_animation(
     )
     axes = axes.flatten()
     fig.suptitle("Stacked Trace Animation (Raw Units)")
+    subplot_hspace = 0.5
 
     color_map = plt.get_cmap("tab10", len(prepared))
     artists = []
@@ -653,10 +795,15 @@ def create_stacked_animation(
         x_min, x_max = np.min(x_vals), np.max(x_vals)
         y_min, y_max = np.min(y_vals), np.max(y_vals)
         x_pad = (x_max - x_min) * 0.05 if x_max > x_min else 1
-        y_pad = (y_max - y_min) * 0.05 if y_max > y_min else 1
+        y_range = (y_max - y_min) if y_max > y_min else 1
+        y_pad_bottom = y_range * 0.05
+        base_y_pad_top = y_range * 0.15
+        base_y_span = y_range + y_pad_bottom + base_y_pad_top
+        target_y_span = base_y_span * 1.25
+        y_pad_top = max(base_y_pad_top, target_y_span - (y_range + y_pad_bottom))
 
         ax.set_xlim(x_min - x_pad, x_max + x_pad)
-        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+        ax.set_ylim(y_min - y_pad_bottom, y_max + y_pad_top)
         ax.set_title(filename)
         ax.set_xlabel("R_p (ohm)")
         ax.set_ylabel("Inductance (uH)")
@@ -772,16 +919,19 @@ def create_stacked_animation(
         repeat=False,
     )
 
+    # Apply layout before saving so spacing changes are reflected in the GIF.
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.subplots_adjust(hspace=subplot_hspace)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if save_gif:
-        gif_filename = f"stacked_animation_{timestamp}.gif"
+        gif_path = Path(output_dir) / f"stacked_animation_{timestamp}.gif"
         fps = max(1, int(round(1000 / interval / max(1, frame_step))))
-        anim.save(gif_filename, writer="pillow", fps=fps)
-        print(f"Saved stacked animation GIF: {gif_filename}")
+        anim.save(str(gif_path), writer="pillow", fps=fps)
+        print(f"Saved stacked animation GIF: {gif_path}")
 
     fig._stacked_anim = anim
 
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
     if show_plot:
         plt.show()
     else:
@@ -796,6 +946,7 @@ def create_stacked_baseline_animation(
     interval=30,
     tail_length=100,
     frame_step=1,
+    output_dir=".",
     save_gif=True,
     show_plot=True,
 ):
@@ -832,6 +983,7 @@ def create_stacked_baseline_animation(
     )
     axes = axes.flatten()
     fig.suptitle("Stacked Trace Animation (Baseline-Shifted)")
+    subplot_hspace = 0.5
 
     color_map = plt.get_cmap("tab10", len(prepared))
     artists = []
@@ -847,7 +999,7 @@ def create_stacked_baseline_animation(
         x_pad = (x_max - x_min) * 0.05 if x_max > x_min else 1
 
         ax.set_xlim(x_min - x_pad, x_max + x_pad)
-        ax.set_ylim(global_y_min - global_y_pad, global_y_max + global_y_pad)
+        ax.set_ylim(global_y_min - global_y_pad, global_y_max + (global_y_pad * 3.0))
         ax.set_title(f"{filename} (baseline-shifted)")
         ax.set_xlabel("R_p (ohm)")
         ax.set_ylabel("Inductance (uH)")
@@ -963,16 +1115,19 @@ def create_stacked_baseline_animation(
         repeat=False,
     )
 
+    # Apply layout before saving so spacing changes are reflected in the GIF.
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.subplots_adjust(hspace=subplot_hspace)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if save_gif:
-        gif_filename = f"stacked_baseline_animation_{timestamp}.gif"
+        gif_path = Path(output_dir) / f"stacked_baseline_animation_{timestamp}.gif"
         fps = max(1, int(round(1000 / interval / max(1, frame_step))))
-        anim.save(gif_filename, writer="pillow", fps=fps)
-        print(f"Saved baseline-stacked animation GIF: {gif_filename}")
+        anim.save(str(gif_path), writer="pillow", fps=fps)
+        print(f"Saved baseline-stacked animation GIF: {gif_path}")
 
     fig._stacked_baseline_anim = anim
 
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
     if show_plot:
         plt.show()
     else:
@@ -984,7 +1139,7 @@ def main():
     print("-" * 40)
     
     # Requested files to load and animate.
-    user_input = "flex_4.csv,flex_8.csv"
+    user_input = "flex_4.csv,flex_8_double.csv,flex_8_triple.csv"
     
     if user_input.lower() == 'quit':
         print("Exiting...")
@@ -1001,6 +1156,9 @@ def main():
     dataframes = load_csv_files(file_paths)
     
     if dataframes:
+        run_output_dir = create_run_output_dir()
+        print(f"Run output directory: {run_output_dir}")
+
         print("\n" + "=" * 40)
         print(f"Loaded {len(dataframes)} file(s) successfully:")
         for filename, df in dataframes.items():
@@ -1038,9 +1196,16 @@ def main():
             print(snr_df[["file", "snr_db", "snr_linear", "signal_amplitude", "noise_sigma", "peak_count"]].head(50))
         if not snr_df.empty:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            snr_filename = f"snr_analysis_{timestamp}.csv"
-            snr_df.to_csv(snr_filename, index=False)
-            print(f"Saved SNR analysis CSV: {snr_filename}")
+            snr_path = run_output_dir / f"snr_analysis_{timestamp}.csv"
+            snr_df.to_csv(snr_path, index=False)
+            print(f"Saved SNR analysis CSV: {snr_path}")
+
+            create_snr_visualizations(
+                snr_df,
+                output_dir=run_output_dir,
+                show_plot=SHOW_PLOTS,
+                save_plots=True,
+            )
 
         create_overlay_animation(
             dataframes,
@@ -1048,6 +1213,7 @@ def main():
             y_col=" sensor2_smooth_rot",
             snr_df=snr_df,
             frame_step=FRAME_STEP,
+            output_dir=run_output_dir,
             save_gif=SAVE_GIFS,
             show_plot=SHOW_PLOTS,
         )
@@ -1058,6 +1224,7 @@ def main():
             y_col=" sensor2_smooth_rot",
             snr_df=snr_df,
             frame_step=FRAME_STEP,
+            output_dir=run_output_dir,
             save_gif=SAVE_GIFS,
             show_plot=SHOW_PLOTS,
         )
@@ -1068,6 +1235,7 @@ def main():
             y_col=" sensor2_smooth_rot",
             snr_df=snr_df,
             frame_step=FRAME_STEP,
+            output_dir=run_output_dir,
             save_gif=SAVE_GIFS,
             show_plot=SHOW_PLOTS,
         )
