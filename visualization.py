@@ -182,15 +182,68 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     for y_idx, value in enumerate(df[snr_col]):
         ax_rank.text(value, y_idx, f" {fmt_snr_display(value)}", va="center", ha="left", fontsize=8)
 
-    ax_delta.plot(rank, df[snr_col], marker="o", linewidth=2,
-                  color="#1f77b4", label=f"SNR ({unit_label})")
-    ax_delta.bar(rank, df["delta_to_best"], alpha=0.25,
-                 color="#ff7f0e", label=f"Delta to best ({unit_label})")
+    # Mixed bar + points view per run:
+    # - bar: non-crack noise baseline estimate (noise_sigma)
+    # - points: per-crack signal amplitudes inferred from per-peak SNR values
+    ax_delta.bar(
+        rank,
+        df["noise_sigma"],
+        alpha=0.35,
+        color="#d62728",
+        edgecolor="#8c1b13",
+        linewidth=0.8,
+        label="Noise baseline (sigma)",
+    )
+
+    crack_signal_points_x = []
+    crack_signal_points_y = []
+    for i, (_, row) in enumerate(df.iterrows(), start=1):
+        noise_sigma = float(row.get("noise_sigma", np.nan))
+        if not np.isfinite(noise_sigma) or noise_sigma <= 0:
+            continue
+
+        peak_snr_db_vals = []
+        raw_peak_snr = row.get("peak_snr_db_values", "")
+        if pd.notna(raw_peak_snr):
+            for token in str(raw_peak_snr).split(";"):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    v = float(token)
+                except ValueError:
+                    continue
+                if np.isfinite(v):
+                    peak_snr_db_vals.append(v)
+
+        if not peak_snr_db_vals:
+            continue
+
+        peak_signal_amplitudes = []
+        for snr_db_val in peak_snr_db_vals:
+            snr_linear_val = 10 ** (snr_db_val / 20.0)
+            peak_signal_amplitudes.append(float(snr_linear_val * noise_sigma))
+
+        jitter = np.linspace(-0.14, 0.14, len(peak_signal_amplitudes)) if len(peak_signal_amplitudes) > 1 else np.array([0.0])
+        crack_signal_points_x.extend((i + jitter).tolist())
+        crack_signal_points_y.extend(peak_signal_amplitudes)
+
+    if crack_signal_points_y:
+        ax_delta.scatter(
+            crack_signal_points_x,
+            crack_signal_points_y,
+            s=32,
+            color="#1f77b4",
+            alpha=0.9,
+            zorder=3,
+            label="Detected crack signal",
+        )
+
     ax_delta.set_xticks(rank)
     ax_delta.set_xticklabels([f"#{i}" for i in rank])
-    ax_delta.set_title("SNR Spread Across Runs")
-    ax_delta.set_xlabel("Rank (best to worst)")
-    ax_delta.set_ylabel(unit_label)
+    ax_delta.set_title("Noise Baseline vs Detected Crack Signals")
+    ax_delta.set_xlabel("Run rank (best to worst)")
+    ax_delta.set_ylabel("Amplitude")
     ax_delta.grid(alpha=0.25)
     ax_delta.legend(loc="best")
 

@@ -13,6 +13,7 @@ from config import (
     LABEL_COLOR_MAP,
     LABEL_SHORT_MAP,
     LABEL_INPUT_MAP,
+    Y_COL,
     X_CANDIDATES,
     Y_CANDIDATES,
 )
@@ -22,7 +23,7 @@ from io_utils import (
     load_cached_windows,
     save_cached_windows,
 )
-from signal_processing import resolve_first_existing_column
+from signal_processing import resolve_first_existing_column, resolve_column_name
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ def run_manual_raw_peak_labeling(
         return pd.DataFrame()
 
     records = []
-    print("\nManual raw window labeling step")
+    print("\nManual rotated-signal window labeling step")
     print("Drag a window, then press 1/2/3 for crack type, 0 to clear, x to trim. Enter when done.")
 
     for filename, df in dataframes.items():
@@ -87,11 +88,20 @@ def run_manual_raw_peak_labeling(
         cache_path  = get_label_cache_path(cache_dir, source_path) if source_path else None
         cached      = load_cached_windows(cache_path, fingerprint) if cache_path else None
 
-        y_col = resolve_first_existing_column(df, Y_CANDIDATES)
+        y_col = resolve_column_name(df, Y_COL, required=False)
         if y_col is None:
-            print(f"Skipping manual labels for {filename}: raw sensor column not found.")
+            y_col = resolve_first_existing_column(df, [Y_COL.strip(), *Y_CANDIDATES])
+            if y_col is not None:
+                print(
+                    f"Warning for {filename}: configured rotated column '{Y_COL}' not found; "
+                    f"using fallback '{y_col}'."
+                )
+        if y_col is None:
+            print(f"Skipping manual labels for {filename}: rotated sensor column not found.")
             continue
 
+        # Keep window x-coordinates on the timeline/sample axis so cached
+        # window spans from prior runs remain compatible.
         x_col = resolve_first_existing_column(df, X_CANDIDATES)
 
         working_df = df.copy()
@@ -138,7 +148,7 @@ def run_manual_raw_peak_labeling(
             y_vals,
             color="#1f77b4",
             linewidth=1.2,
-            label=f"Raw signal ({y_col.strip()})",
+            label=f"Rotated signal ({y_col.strip()})",
         )
 
         status_text = ax.text(
@@ -147,7 +157,7 @@ def run_manual_raw_peak_labeling(
             transform=ax.transAxes, ha="left", va="top", fontsize=9,
             bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.7, "edgecolor": "none"},
         )
-        ax.set_title(f"Manual Window Labeling: {filename}")
+        ax.set_title(f"Manual Window Labeling: {filename} | y={y_col.strip()}")
         ax.set_xlabel(x_col_name)
         ax.set_ylabel(y_col.strip())
         ax.grid(alpha=0.25)
