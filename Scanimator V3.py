@@ -163,6 +163,5 @@ def main():
         show_plot=SHOW_PLOTS,
     )
 
-
 if __name__ == "__main__":
     main()

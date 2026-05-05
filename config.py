@@ -9,7 +9,7 @@
 # --- Execution speed -------------------------------------------------------
 
 FAST_MODE = False
-FRAME_STEP = 5 if FAST_MODE else 4   # 1 = highest quality GIF, 5 = faster
+FRAME_STEP = 5 if FAST_MODE else 1   # 1 = highest quality GIF, 5 = faster
 SHOW_PLOTS = False if FAST_MODE else True
 SAVE_GIFS = True
 
