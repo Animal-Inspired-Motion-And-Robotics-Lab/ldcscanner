@@ -1,8 +1,0 @@
-file,raw_y_col,raw_x_col,candidate_order,peak_index_in_clean_series,x_value,y_value,prominence,manual_label
-flex_8_double.csv,sensor2,timestamp,1,224,527195.0,35.409775,0.11293100000000322,Crack 2
-flex_8_double.csv,sensor2,timestamp,2,352,533595.0,35.550213,0.25726000000000226,Crack 3
-flex_8_double.csv,sensor2,timestamp,3,524,542195.0,35.511177,0.2026520000000005,Crack 3
-flex_8_double.csv,sensor2,timestamp,4,642,548095.0,35.401978,0.10513399999999962,Crack 2
-flex_8_triple.csv,sensor2,timestamp,1,351,204895.0,37.923687,0.1973649999999978,Crack 1
-flex_8_triple.csv,sensor2,timestamp,2,457,210195.0,38.865147,1.4359099999999998,Crack 3
-flex_8_triple.csv,sensor2,timestamp,3,841,229395.0,38.064976,0.6397440000000003,Crack 3

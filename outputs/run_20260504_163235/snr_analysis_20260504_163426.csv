@@ -1,4 +1,0 @@
-file,x_col,y_col,n_samples,noise_floor,noise_sigma,signal_amplitude,snr_linear,snr_db,peak_count,peak_indices,peak_snr_db_values,peak_labels,peak_height_threshold
-flex_4.csv,sensor1_smooth_rot,sensor2_smooth_rot,864,0.0,0.0019295460786002523,0.029636322499999854,15.359219885279385,23.72738315750062,0,,,,0.005788638235800757
-flex_8_double.csv,sensor1_smooth_rot,sensor2_smooth_rot,869,0.0,0.016847585471121248,0.23552365832430222,13.979668405779428,22.909937403517795,0,,,,0.05054275641336374
-flex_8_triple.csv,sensor1_smooth_rot,sensor2_smooth_rot,875,0.0,0.030896257224001206,0.3485436860000004,11.281097366358035,21.047026952119438,0,,,,0.09268877167200362

@@ -8,10 +8,11 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from matplotlib.widgets import SpanSelector
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
 from scipy.signal import find_peaks
 
 # Runtime toggles for faster execution.
-FAST_MODE = False
+FAST_MODE = True
 FRAME_STEP = 5 if FAST_MODE else 1 #1 for highest quality, 5 for faster runs
 SHOW_PLOTS = False if FAST_MODE else True
 SAVE_GIFS = True
@@ -2093,6 +2094,125 @@ def create_stacked_baseline_animation(
         plt.close(fig)
 
 
+def create_3d_contour_plots(
+    dataframes,
+    time_col="timestamp",
+    x_col="sensor1_smooth_rot",
+    y_col=" sensor2_smooth_rot",
+    snr_df=None,
+    output_dir=".",
+    save_plots=True,
+    show_plot=True,
+):
+    """
+    For each run, produce a 3D surface / contour plot where:
+      x = time (timestamp)
+      y = R_p  (sensor1_smooth_rot)
+      z = Inductance (sensor2_smooth_rot)
+
+    Because the data is a single 1-D scan (not a 2-D grid), we build a
+    thin pseudo-surface by stacking two offset copies of the trace so
+    matplotlib's plot_surface / contour machinery has a proper 2-D array
+    to work with.  The top face is the actual scan; peak positions are
+    marked with scatter points.
+    """
+    color_map = plt.get_cmap("tab10", max(len(dataframes), 1))
+
+    time_candidates = [time_col, "time", "sample", "index"]
+    rp_candidates = [x_col, x_col.strip(), "sensor1", " sensor1"]
+    ind_candidates = [y_col, y_col.strip(), "sensor2", " sensor2"]
+
+    for i, (filename, df) in enumerate(dataframes.items()):
+        t_col = next((c for c in time_candidates if c in df.columns), None)
+        rp_col = next((c for c in rp_candidates if c in df.columns), None)
+        ind_col = next((c for c in ind_candidates if c in df.columns), None)
+
+        if rp_col is None or ind_col is None:
+            print(f"3D plot: required columns not found in '{filename}', skipping.")
+            continue
+
+        rp_vals = df[rp_col].to_numpy(dtype=float)
+        ind_vals = df[ind_col].to_numpy(dtype=float)
+
+        if t_col is not None:
+            t_raw = df[t_col].to_numpy(dtype=float)
+        else:
+            t_raw = np.arange(len(rp_vals), dtype=float)
+
+        # Normalise time to [0, 1] for a clean axis.
+        t_min, t_max = t_raw.min(), t_raw.max()
+        t_vals = (t_raw - t_min) / (t_max - t_min) if t_max > t_min else t_raw
+
+        # Build a 2-row pseudo-surface (row 0 = baseline at ind_min, row 1 = actual trace).
+        N = len(t_vals)
+        T = np.vstack([t_vals, t_vals])          # shape (2, N)
+        R = np.vstack([rp_vals, rp_vals])        # shape (2, N)
+        ind_floor = np.full(N, ind_vals.min())
+        Z = np.vstack([ind_floor, ind_vals])     # shape (2, N)
+
+        base_color = color_map(i)
+
+        fig = plt.figure(figsize=(12, 7))
+        ax = fig.add_subplot(111, projection="3d")
+
+        surf = ax.plot_surface(
+            T, R, Z,
+            facecolor=base_color,
+            alpha=0.55,
+            linewidth=0,
+            antialiased=True,
+        )
+
+        # Draw the scan line on top for clarity.
+        ax.plot(t_vals, rp_vals, ind_vals, color=base_color, linewidth=1.5, zorder=5)
+
+        # Project a contour onto the floor (z = ind_min).
+        ax.contourf(
+            T, R, Z,
+            zdir="z",
+            offset=ind_vals.min(),
+            levels=15,
+            cmap="viridis",
+            alpha=0.4,
+        )
+
+        # Mark detected peaks.
+        peak_annotations = get_peak_annotations(snr_df, filename) if snr_df is not None else []
+        if peak_annotations:
+            pk_t = np.array([t_vals[pk] for (pk, _, _) in peak_annotations if pk < N])
+            pk_r = np.array([rp_vals[pk] for (pk, _, _) in peak_annotations if pk < N])
+            pk_z = np.array([ind_vals[pk] for (pk, _, _) in peak_annotations if pk < N])
+            pk_labels = [lbl for (pk, _, lbl) in peak_annotations if pk < N]
+            pk_snrs = [snr for (pk, snr, _) in peak_annotations if pk < N]
+            ax.scatter(pk_t, pk_r, pk_z, color="red", s=60, zorder=6, depthshade=False)
+            for tx, rx, zx, lbl, snr_val in zip(pk_t, pk_r, pk_z, pk_labels, pk_snrs):
+                ax.text(
+                    tx, rx, zx,
+                    f"  {lbl}\n  {fmt_snr_db(snr_val)}",
+                    fontsize=7,
+                    color="red",
+                    zorder=7,
+                )
+
+        ax.set_xlabel("Time (norm.)")
+        ax.set_ylabel("R_p")
+        ax.set_zlabel("Inductance")
+        ax.set_title(f"3D Contour — {filename}")
+        plt.tight_layout()
+
+        if save_plots:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = filename.replace(".csv", "").replace(" ", "_")
+            out_path = Path(output_dir) / f"3d_contour_{safe_name}_{ts}.png"
+            fig.savefig(str(out_path), dpi=150)
+            print(f"Saved 3D contour plot: {out_path}")
+
+        if show_plot:
+            plt.show()
+        else:
+            plt.close(fig)
+
+
 def main():
     print("CSV Loader + Animation + SNR Analysis")
     print("-" * 40)
@@ -2201,6 +2321,17 @@ def main():
             frame_step=FRAME_STEP,
             output_dir=run_output_dir,
             save_gif=SAVE_GIFS,
+            show_plot=SHOW_PLOTS,
+        )
+
+        create_3d_contour_plots(
+            dataframes,
+            time_col="timestamp",
+            x_col="sensor1_smooth_rot",
+            y_col=" sensor2_smooth_rot",
+            snr_df=snr_df,
+            output_dir=run_output_dir,
+            save_plots=True,
             show_plot=SHOW_PLOTS,
         )
     else:
