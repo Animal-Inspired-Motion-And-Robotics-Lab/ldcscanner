@@ -8,14 +8,14 @@
 
 # --- Execution speed -------------------------------------------------------
 
-FAST_MODE = True
-FRAME_STEP = 5 if FAST_MODE else 1   # 1 = highest quality GIF, 5 = faster
+FAST_MODE = False
+FRAME_STEP = 5 if FAST_MODE else 4   # 1 = highest quality GIF, 5 = faster
 SHOW_PLOTS = False if FAST_MODE else True
 SAVE_GIFS = True
 
 # --- Sensor column names ---------------------------------------------------
-# Edit these if the CSV headers change.
 
+# Edit these if the CSV headers change.
 X_COL = "sensor1_smooth_rot"
 Y_COL = " sensor2_smooth_rot"   # leading space is intentional — matches CSV
 TIME_COL = "timestamp"

@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from datetime import datetime
 from pathlib import Path
 
@@ -638,6 +639,225 @@ def create_stacked_baseline_animation(
 
 
 # ---------------------------------------------------------------------------
+# 3-D overlay animation (time × R_p × Inductance)
+# ---------------------------------------------------------------------------
+
+def create_3d_overlay_animation(
+    dataframes,
+    time_col="timestamp",
+    x_col="sensor1_smooth_rot",
+    y_col=" sensor2_smooth_rot",
+    snr_df=None,
+    interval=30,
+    tail_length=100,
+    frame_step=1,
+    output_dir=".",
+    save_gif=True,
+    show_plot=True,
+):
+    """
+    Animate overlaid 3-D traces where:
+      X-axis = time, normalised per-file to [0, 1]
+      Y-axis = R_p  (sensor1_smooth_rot, raw units)
+      Z-axis = Inductance (sensor2_smooth_rot, normalised per-file to [0, 1])
+
+    A faint ghost trace is drawn first for context, then a fading-tail
+    point sweeps along each file's path.  Detected crack peaks appear as
+    triangle markers when the animation reaches their position.
+
+    Note: 3-D animations cannot use matplotlib blitting, so they render
+    more slowly than the 2-D animations — use frame_step > 1 if needed.
+    """
+    if not dataframes:
+        print("No dataframes available for 3D overlay animation.")
+        return
+
+    time_candidates = [time_col, "time", "sample", "index"]
+    rp_candidates   = [x_col, x_col.strip(), "sensor1", " sensor1"]
+    ind_candidates  = [y_col, y_col.strip(), "sensor2", " sensor2"]
+
+    # ── load all three channels per file ──────────────────────────────────
+    prepared = []
+    for filename, df in dataframes.items():
+        t_col_found = resolve_first_existing_column(df, time_candidates)
+        rp_col      = resolve_first_existing_column(df, rp_candidates)
+        ind_col     = resolve_first_existing_column(df, ind_candidates)
+
+        if rp_col is None or ind_col is None:
+            print(f"3D overlay animation: required columns not found in '{filename}', skipping.")
+            continue
+
+        rp_raw  = df[rp_col].to_numpy(dtype=float)
+        ind_raw = df[ind_col].to_numpy(dtype=float)
+        t_raw   = (df[t_col_found].to_numpy(dtype=float) if t_col_found
+                   else np.arange(len(rp_raw), dtype=float))
+
+        t_min, t_max = t_raw.min(), t_raw.max()
+        t_vals = (t_raw - t_min) / (t_max - t_min) if t_max > t_min else t_raw.copy()
+
+        ind_min, ind_max = ind_raw.min(), ind_raw.max()
+        ind_vals = (ind_raw - ind_min) / (ind_max - ind_min) if ind_max > ind_min else ind_raw.copy()
+
+        prepared.append((filename, t_vals, rp_raw, ind_vals))
+
+    if not prepared:
+        print("No valid files for 3D overlay animation.")
+        return
+
+    # ── build figure ──────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(12, 8))
+    ax  = fig.add_subplot(111, projection="3d")
+    ax.set_xlabel("Time (norm.)")
+    ax.set_ylabel("R_p (ohm)")
+    ax.set_zlabel("Inductance (norm.)")
+    ax.set_title("3D Overlay Animation")
+
+    color_map  = plt.get_cmap("tab10", len(prepared))
+    artists    = []
+    max_frames = max(len(tv) for _, tv, _, _ in prepared)
+
+    for i, (filename, t_vals, rp_vals, ind_vals) in enumerate(prepared):
+        base_color = color_map(i)
+        N          = len(t_vals)
+
+        peak_annotations = get_peak_annotations(snr_df, filename)
+        snr_db           = get_snr_value_db(snr_df, filename)
+        peak_count       = get_peak_count(snr_df, filename)
+
+        # Ghost trace for context
+        ax.plot(t_vals, rp_vals, ind_vals,
+                color=base_color, linewidth=0.8, alpha=0.18, zorder=1)
+
+        # Filled curtain under trace + floor projection (matches 3D contour style)
+        N_s   = len(t_vals)
+        T_s   = np.vstack([t_vals,  t_vals])
+        R_s   = np.vstack([rp_vals, rp_vals])
+        Z_s   = np.vstack([np.zeros(N_s), ind_vals])   # floor at 0 (normalised)
+        ax.plot_surface(T_s, R_s, Z_s, facecolor=base_color, alpha=0.15,
+                        linewidth=0, antialiased=False)
+        ax.contourf(T_s, R_s, Z_s, zdir="z", offset=0.0,
+                    levels=8, colors=[base_color], alpha=0.10)
+
+        # Fading tail (Line3DCollection — same idea as LineCollection in 2-D).
+        # Must be initialised with a non-empty segment list; add_collection3d
+        # calls auto_scale_xyz(*segments.transpose()) which fails on shape (0,).
+        # The dummy segment is invisible (alpha=0) and overwritten on frame 1.
+        _dummy = [[[t_vals[0], rp_vals[0], ind_vals[0]],
+                   [t_vals[0], rp_vals[0], ind_vals[0]]]]
+        tail_col = Line3DCollection(_dummy, linewidths=2.0, zorder=2, alpha=0.0)
+        ax.add_collection3d(tail_col)
+
+        # Moving point
+        label = (f"{filename} | SNR: {fmt_snr_db(snr_db)} | "
+                 f"Peaks: {peak_count if peak_count is not None else 'n/a'}")
+        point, = ax.plot([], [], [], marker="o", ms=5,
+                         color=base_color, zorder=3, label=label)
+
+        # Peak markers — triangle markers that appear when the trace arrives
+        peak_markers = []
+        for (pk_idx, _, _) in peak_annotations:
+            if pk_idx < N:
+                pm, = ax.plot([t_vals[pk_idx]], [rp_vals[pk_idx]], [ind_vals[pk_idx]],
+                              marker="^", ms=7, color=base_color, zorder=4,
+                              alpha=0.0, linestyle="none")
+            else:
+                pm, = ax.plot([], [], [], marker="^", ms=7,
+                              color=base_color, zorder=4, linestyle="none")
+            peak_markers.append(pm)
+
+        # Text annotations that appear when the sweeping point reaches each peak
+        peak_texts = []
+        for (pk_idx, snr_val, lbl) in peak_annotations:
+            if pk_idx < N:
+                pt = ax.text(t_vals[pk_idx], rp_vals[pk_idx], ind_vals[pk_idx],
+                             f"  {lbl}\n  {fmt_snr_db(snr_val)}",
+                             fontsize=7, color=base_color, zorder=5, alpha=0.0)
+            else:
+                pt = ax.text(0, 0, 0, "", fontsize=7, alpha=0.0)
+            peak_texts.append(pt)
+
+        artists.append((tail_col, point, base_color,
+                        peak_annotations, peak_markers, peak_texts,
+                        t_vals, rp_vals, ind_vals, N))
+
+    ax.legend(loc="upper left", fontsize=7)
+
+    # ── animation callbacks ───────────────────────────────────────────────
+
+    def init():
+        for (tail_col, point, _, _, peak_markers, peak_texts,
+             t_vals, rp_vals, ind_vals, _) in artists:
+            # Reset tail to the invisible dummy; never set segments to []
+            # because that triggers the same auto_scale_xyz shape error.
+            tail_col.set_segments([[[t_vals[0], rp_vals[0], ind_vals[0]],
+                                    [t_vals[0], rp_vals[0], ind_vals[0]]]])
+            tail_col.set_alpha(0.0)
+            point.set_data([], [])
+            point.set_3d_properties([])
+            for pm in peak_markers:
+                pm.set_alpha(0.0)
+            for pt in peak_texts:
+                pt.set_alpha(0.0)
+        return []
+
+    def update(frame):
+        for (tail_col, point, base_color,
+             peak_annotations, peak_markers, peak_texts,
+             t_vals, rp_vals, ind_vals, N) in artists:
+
+            last_idx  = min(frame, N - 1)
+            start_idx = max(0, last_idx - tail_length + 1)
+
+            tt = t_vals[start_idx: last_idx + 1]
+            rr = rp_vals[start_idx: last_idx + 1]
+            ii = ind_vals[start_idx: last_idx + 1]
+
+            if len(tt) > 1:
+                pts      = np.column_stack([tt, rr, ii])
+                segments = np.stack([pts[:-1], pts[1:]], axis=1)   # shape (n, 2, 3)
+                n        = len(segments)
+                alphas   = np.linspace(0.05, 1.0, n)
+                colors   = np.tile(np.array(base_color), (n, 1))
+                colors[:, 3] = alphas
+                tail_col.set_segments(segments)
+                tail_col.set_color(colors)
+            else:
+                tail_col.set_segments([[[t_vals[0], rp_vals[0], ind_vals[0]],
+                                        [t_vals[0], rp_vals[0], ind_vals[0]]]])
+                tail_col.set_alpha(0.0)
+
+            cur = min(frame, N - 1)
+            point.set_data([t_vals[cur]], [rp_vals[cur]])
+            point.set_3d_properties([ind_vals[cur]])
+
+            # Reveal peak markers and text labels as the animation sweeps past them
+            for (pk_idx, _, _), pm, pt in zip(peak_annotations, peak_markers, peak_texts):
+                visible = pk_idx < N and frame >= pk_idx
+                pm.set_alpha(0.9 if visible else 0.0)
+                pt.set_alpha(0.9 if visible else 0.0)
+
+        return []
+
+    anim = FuncAnimation(
+        fig, update,
+        frames=range(0, max_frames, max(1, frame_step)),
+        init_func=init,
+        interval=interval,
+        blit=False,   # 3-D axes do not support blitting
+        repeat=False,
+    )
+
+    plt.tight_layout()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _save_and_close_animation(
+        fig, anim, output_dir,
+        f"overlay_3d_animation_{timestamp}.gif",
+        interval, frame_step, save_gif, show_plot,
+        "_overlay_3d_anim",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3-D contour plots
 # ---------------------------------------------------------------------------
 
@@ -712,8 +932,8 @@ def create_3d_contour_plots(
                             fontsize=7, color="red", zorder=7)
 
         ax.set_xlabel("Time (norm.)")
-        ax.set_ylabel("R_p")
-        ax.set_zlabel("Inductance")
+        ax.set_ylabel("R_p (ohm)")
+        ax.set_zlabel("Inductance (uH)")
         ax.set_title(f"3D Contour — {filename}")
         plt.tight_layout()
 

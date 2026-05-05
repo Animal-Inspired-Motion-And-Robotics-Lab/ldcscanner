@@ -59,6 +59,7 @@ def run_manual_raw_peak_labeling(
     For each file the user drags spans on a matplotlib figure and presses:
       1 / 2 / 3  — label the current span as Crack 1/2/3
       0          — erase all windows overlapping the current span
+            x          — trim (delete) datapoints in the current span
       Backspace  — remove the last committed window
       Enter      — finish and move to the next file
 
@@ -75,7 +76,7 @@ def run_manual_raw_peak_labeling(
 
     records = []
     print("\nManual raw window labeling step")
-    print("Drag a window, then press 1/2/3 for crack type or 0 to clear. Enter when done.")
+    print("Drag a window, then press 1/2/3 for crack type, 0 to clear, x to trim. Enter when done.")
 
     for filename, df in dataframes.items():
         if df.empty:
@@ -93,18 +94,24 @@ def run_manual_raw_peak_labeling(
 
         x_col = resolve_first_existing_column(df, X_CANDIDATES)
 
-        y_series = pd.to_numeric(df[y_col], errors="coerce")
-        if x_col is None:
-            x_series   = pd.Series(np.arange(len(df), dtype=float), index=df.index)
-            x_col_name = "sample_index"
-        else:
-            x_series   = pd.to_numeric(df[x_col], errors="coerce")
-            x_col_name = x_col
+        working_df = df.copy()
 
-        valid          = x_series.notna() & y_series.notna()
-        x_vals         = x_series[valid].to_numpy(dtype=float)
-        y_vals         = y_series[valid].to_numpy(dtype=float)
-        raw_row_indices = np.flatnonzero(valid.to_numpy())
+        def get_plot_arrays(df_in):
+            y_series_local = pd.to_numeric(df_in[y_col], errors="coerce")
+            if x_col is None:
+                x_series_local = pd.Series(np.arange(len(df_in), dtype=float), index=df_in.index)
+                x_col_name_local = "sample_index"
+            else:
+                x_series_local = pd.to_numeric(df_in[x_col], errors="coerce")
+                x_col_name_local = x_col
+
+            valid_local = x_series_local.notna() & y_series_local.notna()
+            x_vals_local = x_series_local[valid_local].to_numpy(dtype=float)
+            y_vals_local = y_series_local[valid_local].to_numpy(dtype=float)
+            raw_row_indices_local = np.flatnonzero(valid_local.to_numpy())
+            return x_vals_local, y_vals_local, raw_row_indices_local, x_col_name_local
+
+        x_vals, y_vals, raw_row_indices, x_col_name = get_plot_arrays(working_df)
 
         if len(y_vals) < 10:
             print(f"Skipping manual labels for {filename}: insufficient numeric raw samples.")
@@ -126,12 +133,17 @@ def run_manual_raw_peak_labeling(
         active_sel = {"start_x": None, "end_x": None, "patch": None}
 
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(x_vals, y_vals, color="#1f77b4", linewidth=1.2,
-                label=f"Raw signal ({y_col.strip()})")
+        signal_line, = ax.plot(
+            x_vals,
+            y_vals,
+            color="#1f77b4",
+            linewidth=1.2,
+            label=f"Raw signal ({y_col.strip()})",
+        )
 
         status_text = ax.text(
             0.01, 0.98,
-            "Drag a span to create a window. 1/2/3/0 label it. Enter=done",
+            "Drag a span to create a window. 1/2/3 label. 0=clear. x=trim. Enter=done",
             transform=ax.transAxes, ha="left", va="top", fontsize=9,
             bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.7, "edgecolor": "none"},
         )
@@ -154,8 +166,16 @@ def run_manual_raw_peak_labeling(
         # ── helpers shared between interactive and text modes ──────────────
 
         def refresh_window_display():
+            nonlocal x_vals, y_vals, raw_row_indices, y_min, y_max, y_range, text_y
             current_xlim = ax.get_xlim()
             current_ylim = ax.get_ylim()
+
+            if len(x_vals) > 0 and len(y_vals) > 0:
+                signal_line.set_data(x_vals, y_vals)
+                y_min   = float(np.min(y_vals))
+                y_max   = float(np.max(y_vals))
+                y_range = max(y_max - y_min, 1e-9)
+                text_y  = y_max + (0.04 * y_range)
 
             crack_windows = [w for w in windows if w["label"] in CRACK_LABELS]
             active_text = (
@@ -164,7 +184,7 @@ def run_manual_raw_peak_labeling(
             )
             status_text.set_text(
                 f"Active selection: {active_text} | Crack windows: {len(crack_windows)} | "
-                "0 clears active span + overlapping | Enter=done"
+                "0 clears active span + overlapping | x trims selected data | Enter=done"
             )
 
             crack_idx = 0
@@ -199,8 +219,9 @@ def run_manual_raw_peak_labeling(
                     if window["text"] is not None:
                         window["text"].set_visible(False)
 
-            ax.set_xlim(current_xlim)
-            ax.set_ylim(current_ylim)
+            if len(x_vals) > 0 and len(y_vals) > 0:
+                ax.set_xlim(current_xlim)
+                ax.set_ylim(current_ylim)
             fig.canvas.draw_idle()
 
         # ── interactive (GUI) mode ─────────────────────────────────────────
@@ -208,7 +229,7 @@ def run_manual_raw_peak_labeling(
         if show_plot:
             print(
                 f"\nInteractive labeling for {filename}: drag a window, then press "
-                "1=Crack1, 2=Crack2, 3=Crack3, 0=clear span+overlapping, "
+                "1=Crack1, 2=Crack2, 3=Crack3, 0=clear span+overlapping, x=trim selected data, "
                 "Enter=finish, Backspace/Delete=remove last window."
             )
 
@@ -283,6 +304,62 @@ def run_manual_raw_peak_labeling(
                     active_sel["patch"]   = None
                     active_sel["start_x"] = None
                     active_sel["end_x"]   = None
+                    refresh_window_display()
+
+                elif key == "x":
+                    nonlocal working_df, x_vals, y_vals, raw_row_indices
+
+                    if active_sel["start_x"] is None:
+                        print("Drag a window first.")
+                        return
+
+                    start_x = float(active_sel["start_x"])
+                    end_x   = float(active_sel["end_x"])
+                    in_trim = (x_vals >= start_x) & (x_vals <= end_x)
+                    trim_count = int(np.count_nonzero(in_trim))
+                    if trim_count == 0:
+                        print("No points in selected span to trim.")
+                        return
+
+                    # Drop trimmed points from the dataframe used by downstream analysis.
+                    drop_raw_indices = raw_row_indices[in_trim]
+                    working_df = working_df.drop(index=working_df.index[drop_raw_indices]).reset_index(drop=True)
+                    dataframes[filename] = working_df
+
+                    # Remove windows that now overlap the trimmed span.
+                    kept = []
+                    removed_window_count = 0
+                    for w in windows:
+                        overlaps = max(float(w["start_x"]), start_x) <= min(float(w["end_x"]), end_x)
+                        if overlaps:
+                            removed_window_count += 1
+                            if w["patch"] is not None:
+                                w["patch"].remove()
+                            if w["text"] is not None:
+                                w["text"].remove()
+                        else:
+                            kept.append(w)
+                    windows[:] = kept
+
+                    x_vals, y_vals, raw_row_indices, _ = get_plot_arrays(working_df)
+                    if len(y_vals) < 10:
+                        print(
+                            f"Trimmed {trim_count} point(s); only {len(y_vals)} numeric points remain. "
+                            "Finishing this file."
+                        )
+                        plt.close(fig)
+                        return
+
+                    if active_sel["patch"] is not None:
+                        active_sel["patch"].remove()
+                    active_sel["patch"] = None
+                    active_sel["start_x"] = None
+                    active_sel["end_x"] = None
+
+                    print(
+                        f"Trimmed {trim_count} point(s) from {filename}; "
+                        f"removed {removed_window_count} overlapping window(s)."
+                    )
                     refresh_window_display()
 
                 elif key in ("backspace", "delete"):
