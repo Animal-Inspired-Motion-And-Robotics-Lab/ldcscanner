@@ -164,51 +164,16 @@ def compute_xy_crack_snr_metrics(
     if len(x_vals) < 20 or len(y_vals) < 20:
         return None
 
-    # Enforce odd baseline window and clamp to series length.
-    baseline_window = max(11, baseline_window)
-    if baseline_window % 2 == 0:
-        baseline_window += 1
-    max_window = len(x_vals) if len(x_vals) % 2 == 1 else len(x_vals) - 1
-    baseline_window = min(baseline_window, max_window)
-    if baseline_window < 3:
-        return None
+    y_vals = np.asarray(y_vals, dtype=float)
 
-    y_base = pd.Series(y_vals).rolling(window=baseline_window, center=True, min_periods=1).median().to_numpy()
-    y_dev = y_vals - y_base
-
-    # Estimate noise from non-crack regions when ground-truth windows exist.
-    noise_source = y_dev
-    if manual_windows and row_indices is not None and len(row_indices) == len(y_dev):
-        crack_mask = np.zeros(len(y_dev), dtype=bool)
-        row_indices_arr = np.asarray(row_indices, dtype=int)
-        for window in manual_windows:
-            start_row = window.get("start_row")
-            end_row   = window.get("end_row")
-            if start_row is None or end_row is None:
-                continue
-            if not (np.isfinite(start_row) and np.isfinite(end_row)):
-                continue
-            lo, hi = sorted((int(start_row), int(end_row)))
-            crack_mask |= (row_indices_arr >= lo) & (row_indices_arr <= hi)
-        non_crack = y_dev[~crack_mask]
-        if len(non_crack) >= 10:
-            noise_source = non_crack
-
-    noise_floor = float(np.median(noise_source))
-    noise_mad   = float(np.median(np.abs(noise_source - noise_floor)))
-    noise_sigma = 1.4826 * noise_mad
-    if noise_sigma <= 0:
-        noise_sigma = float(np.std(noise_source))
-    if noise_sigma <= 0:
-        return None
-
-    peak_labels       = []
+    peak_labels        = []
     per_window_records = []
-    peak_height_threshold = noise_floor + (sigma_threshold_multiplier * noise_sigma)
+    peak_height_threshold = np.nan
 
     if manual_windows:
-        selected_peak_indices = []
-        selected_peak_heights = []
+        windows_info = []
+        crack_mask = np.zeros(len(y_vals), dtype=bool)
+        row_indices_arr = np.asarray(row_indices, dtype=int) if row_indices is not None else None
 
         for window in manual_windows:
             label = str(window["label"])
@@ -219,15 +184,13 @@ def compute_xy_crack_snr_metrics(
             if (
                 start_row is not None
                 and end_row is not None
-                and row_indices is not None
-                and len(row_indices) == len(y_dev)
+                and row_indices_arr is not None
+                and len(row_indices_arr) == len(y_vals)
                 and np.isfinite(start_row)
                 and np.isfinite(end_row)
             ):
                 lo, hi = sorted((int(start_row), int(end_row)))
-                in_window_idx = np.flatnonzero(
-                    (np.asarray(row_indices) >= lo) & (np.asarray(row_indices) <= hi)
-                )
+                in_window_idx = np.flatnonzero((row_indices_arr >= lo) & (row_indices_arr <= hi))
             elif "start_x" in window and "end_x" in window:
                 start_x, end_x = float(window["start_x"]), float(window["end_x"])
                 if np.isfinite(start_x) and np.isfinite(end_x):
@@ -237,44 +200,95 @@ def compute_xy_crack_snr_metrics(
             if len(in_window_idx) == 0:
                 continue
 
-            peak_idx    = int(in_window_idx[int(np.argmax(y_dev[in_window_idx]))])
-            peak_signal = float(y_dev[peak_idx] - noise_floor)
-            peak_snr_linear = (peak_signal / noise_sigma) if noise_sigma > 0 and peak_signal > 0 else 0.0
-            peak_snr_db     = float(20 * np.log10(peak_snr_linear)) if peak_snr_linear > 0 else float("-inf")
+            start_idx = int(in_window_idx[0])
+            end_idx = int(in_window_idx[-1])
+            crack_mask[start_idx:end_idx + 1] = True
+            windows_info.append({
+                "label": label,
+                "indices": in_window_idx,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+            })
+
+        if not windows_info:
+            return None
+
+        windows_info.sort(key=lambda w: (w["start_idx"], w["end_idx"]))
+
+        non_crack_vals = y_vals[~crack_mask]
+        if len(non_crack_vals) < 2:
+            return None
+
+        sigma_baseline = float(np.std(non_crack_vals, ddof=0))
+        if sigma_baseline <= 0:
+            return None
+
+        selected_peak_indices = []
+        selected_peak_values = []
+        peak_signals = []
+
+        for i, info in enumerate(windows_info):
+            label = info["label"]
+            in_window_idx = info["indices"]
+
+            peak_idx = int(in_window_idx[int(np.argmax(y_vals[in_window_idx]))])
+            a_peak = float(y_vals[peak_idx])
+
+            left_start = 0 if i == 0 else int(windows_info[i - 1]["end_idx"]) + 1
+            left_end = int(info["start_idx"]) - 1
+            right_start = int(info["end_idx"]) + 1
+            right_end = (len(y_vals) - 1) if i == (len(windows_info) - 1) else int(windows_info[i + 1]["start_idx"]) - 1
+
+            left_vals = y_vals[left_start:left_end + 1] if left_end >= left_start else np.array([], dtype=float)
+            right_vals = y_vals[right_start:right_end + 1] if right_end >= right_start else np.array([], dtype=float)
+
+            if len(left_vals) == 0 and len(right_vals) == 0:
+                continue
+
+            baseline_neighbors = np.concatenate([left_vals, right_vals])
+            mu_baseline = float(np.mean(baseline_neighbors))
+
+            peak_signal = float(a_peak - mu_baseline)
+            peak_snr_linear = peak_signal / sigma_baseline
+            peak_snr_db = float(20 * np.log10(peak_snr_linear)) if peak_snr_linear > 0 else float("-inf")
 
             start_row_record = end_row_record = peak_row_record = np.nan
-            if row_indices is not None and len(row_indices) == len(y_dev):
-                start_row_record = int(np.asarray(row_indices)[int(in_window_idx[0])])
-                end_row_record   = int(np.asarray(row_indices)[int(in_window_idx[-1])])
-                peak_row_record  = int(np.asarray(row_indices)[peak_idx])
+            if row_indices_arr is not None and len(row_indices_arr) == len(y_vals):
+                start_row_record = int(row_indices_arr[int(in_window_idx[0])])
+                end_row_record = int(row_indices_arr[int(in_window_idx[-1])])
+                peak_row_record = int(row_indices_arr[peak_idx])
 
             selected_peak_indices.append(peak_idx)
-            selected_peak_heights.append(float(y_dev[peak_idx]))
+            selected_peak_values.append(a_peak)
+            peak_signals.append(peak_signal)
             peak_labels.append(label)
             per_window_records.append({
-                "manual_label":              label,
-                "window_start_x":            float(x_vals[in_window_idx[0]]),
-                "window_end_x":              float(x_vals[in_window_idx[-1]]),
-                "window_start_raw_idx":      start_row_record,
-                "window_end_raw_idx":        end_row_record,
+                "manual_label":               label,
+                "window_start_x":             float(x_vals[in_window_idx[0]]),
+                "window_end_x":               float(x_vals[in_window_idx[-1]]),
+                "window_start_raw_idx":       start_row_record,
+                "window_end_raw_idx":         end_row_record,
                 "peak_index_in_clean_series": int(peak_idx),
-                "peak_raw_idx":              peak_row_record,
-                "peak_x":                    float(x_vals[peak_idx]),
-                "peak_y":                    float(y_vals[peak_idx]),
-                "noise_floor":               float(noise_floor),
-                "noise_sigma":               float(noise_sigma),
-                "peak_signal_amplitude":     peak_signal,
-                "peak_snr_linear":           float(peak_snr_linear),
-                "peak_snr_db":               peak_snr_db,
+                "peak_raw_idx":               peak_row_record,
+                "peak_x":                     float(x_vals[peak_idx]),
+                "peak_y":                     float(y_vals[peak_idx]),
+                "noise_floor":                mu_baseline,
+                "noise_sigma":                float(sigma_baseline),
+                "peak_signal_amplitude":      peak_signal,
+                "peak_snr_linear":            float(peak_snr_linear),
+                "peak_snr_db":                peak_snr_db,
             })
 
         peak_indices = np.array(selected_peak_indices, dtype=int)
-        peak_heights = np.array(selected_peak_heights, dtype=float)
+        peak_values = np.array(selected_peak_values, dtype=float)
+        peak_signals_arr = np.array(peak_signals, dtype=float)
+        noise_floor = float(np.mean(non_crack_vals))
+        noise_sigma = float(sigma_baseline)
 
     elif allow_automatic_fallback:
         peak_indices, peak_props = find_peaks(
-            y_dev,
-            height=peak_height_threshold,
+            y_vals,
+            height=np.median(y_vals) + (sigma_threshold_multiplier * np.std(y_vals)),
             distance=max(1, min_peak_distance),
         )
         peak_heights = peak_props.get("peak_heights", np.array([]))
@@ -291,20 +305,45 @@ def compute_xy_crack_snr_metrics(
     else:
         return None
 
-    if len(peak_heights) == 0:
+    if manual_windows:
+        if len(peak_indices) == 0:
+            return None
+
+        signal_amplitude = float(np.median(peak_signals_arr))
+        snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
+        snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
+
+        peak_snr_db_values = []
+        for s in peak_signals_arr:
+            if noise_sigma > 0:
+                s_lin = float(s / noise_sigma)
+                peak_snr_db_values.append(float(20 * np.log10(s_lin)) if s_lin > 0 else float("-inf"))
+            else:
+                peak_snr_db_values.append(float("-inf"))
+
+    else:
+        if len(peak_heights) == 0:
+            return None
+
+        noise_floor = float(np.median(y_vals))
+        noise_sigma = float(np.std(y_vals))
+        if noise_sigma <= 0:
+            return None
+
+        signal_amplitude = float(np.median(peak_heights - noise_floor))
+        snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
+        snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
+
+        peak_snr_db_values = []
+        for height in peak_heights:
+            s = float(height - noise_floor)
+            if noise_sigma > 0 and s > 0:
+                peak_snr_db_values.append(float(20 * np.log10(s / noise_sigma)))
+            else:
+                peak_snr_db_values.append(float("-inf"))
+
+    if manual_windows and len(peak_signals_arr) == 0:
         return None
-
-    signal_amplitude = float(np.median(peak_heights - noise_floor))
-    snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
-    snr_db     = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
-
-    peak_snr_db_values = []
-    for height in peak_heights:
-        s = float(height - noise_floor)
-        if noise_sigma > 0 and s > 0:
-            peak_snr_db_values.append(float(20 * np.log10(s / noise_sigma)))
-        else:
-            peak_snr_db_values.append(float("-inf"))
 
     return {
         "noise_sigma":          float(noise_sigma),

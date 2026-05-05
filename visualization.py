@@ -7,12 +7,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
+from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from datetime import datetime
 from pathlib import Path
 
-from config import LABEL_COLOR_MAP, CRACK_LABELS
+from config import LABEL_COLOR_MAP, CRACK_LABELS, X_COL, Y_COL, SNR_DISPLAY_MODE
 from signal_processing import prepare_xy_series, resolve_first_existing_column
 
 
@@ -28,6 +29,28 @@ def get_snr_value_db(snr_df, filename):
     return float(matches.iloc[0]["snr_db"]) if not matches.empty else None
 
 
+def _use_linear_snr_display():
+    return str(SNR_DISPLAY_MODE).strip().lower() == "linear"
+
+
+def _snr_unit_label():
+    return "linear" if _use_linear_snr_display() else "dB"
+
+
+def get_snr_value_display(snr_df, filename):
+    """Return file-level SNR in configured display units."""
+    if snr_df is None or snr_df.empty:
+        return None
+    matches = snr_df[snr_df["file"] == filename]
+    if matches.empty:
+        return None
+    row = matches.iloc[0]
+    key = "snr_linear" if _use_linear_snr_display() else "snr_db"
+    if key not in row or pd.isna(row[key]):
+        return None
+    return float(row[key])
+
+
 def get_peak_count(snr_df, filename):
     """Return the detected crack peak count for filename, or None."""
     if snr_df is None or snr_df.empty:
@@ -39,7 +62,7 @@ def get_peak_count(snr_df, filename):
 def get_peak_annotations(snr_df, filename):
     """
     Return per-peak annotations for filename as a list of
-    (peak_index, peak_snr_db, peak_label) tuples.
+    (peak_index, peak_snr_value, peak_label) tuples in configured units.
     """
     if snr_df is None or snr_df.empty:
         return []
@@ -56,7 +79,11 @@ def get_peak_annotations(snr_df, filename):
         return []
 
     indices = [int(x)   for x in str(idx_str).split(";")   if x.strip()]
-    snr_vals = [float(x) for x in str(snr_str).split(";")   if x.strip()]
+    snr_vals_db = [float(x) for x in str(snr_str).split(";")   if x.strip()]
+    if _use_linear_snr_display():
+        snr_vals = [float(10 ** (v / 20.0)) for v in snr_vals_db]
+    else:
+        snr_vals = snr_vals_db
     labels   = [x.strip() for x in str(label_str).split(";") if x.strip()]
 
     return [
@@ -77,6 +104,15 @@ def fmt_snr_db(value):
     return f"{value:.1f} dB"
 
 
+def fmt_snr_display(value):
+    """Format SNR for configured display mode."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    if _use_linear_snr_display():
+        return f"{value:.3f}"
+    return f"{value:.1f} dB"
+
+
 def parse_peak_snr_series(peak_snr_db_values):
     """Parse a semicolon-separated SNR string into a list of finite floats."""
     if pd.isna(peak_snr_db_values):
@@ -91,7 +127,10 @@ def parse_peak_snr_series(peak_snr_db_values):
         except ValueError:
             continue
         if np.isfinite(v):
-            values.append(v)
+            if _use_linear_snr_display():
+                values.append(float(10 ** (v / 20.0)))
+            else:
+                values.append(v)
     return values
 
 
@@ -122,10 +161,12 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         return []
 
     plot_outputs = []
-    df = snr_df.copy().sort_values("snr_db", ascending=False).reset_index(drop=True)
+    snr_col = "snr_linear" if _use_linear_snr_display() else "snr_db"
+    df = snr_df.copy().sort_values(snr_col, ascending=False).reset_index(drop=True)
     rank     = np.arange(1, len(df) + 1)
-    best_snr = float(df.loc[0, "snr_db"])
-    df["delta_to_best_db"] = best_snr - df["snr_db"]
+    best_snr = float(df.loc[0, snr_col])
+    df["delta_to_best"] = best_snr - df[snr_col]
+    unit_label = _snr_unit_label()
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     ax_rank, ax_delta, ax_signal_noise, ax_peaks = (
@@ -133,29 +174,29 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     )
 
     bar_colors = plt.cm.Blues(np.linspace(0.45, 0.9, len(df)))
-    ax_rank.barh(df["file"], df["snr_db"], color=bar_colors)
+    ax_rank.barh(df["file"], df[snr_col], color=bar_colors)
     ax_rank.invert_yaxis()
     ax_rank.set_title("Run Ranking by Crack SNR")
-    ax_rank.set_xlabel("SNR (dB)")
+    ax_rank.set_xlabel(f"SNR ({unit_label})")
     ax_rank.grid(axis="x", alpha=0.25)
-    for y_idx, value in enumerate(df["snr_db"]):
-        ax_rank.text(value, y_idx, f" {value:.1f}", va="center", ha="left", fontsize=8)
+    for y_idx, value in enumerate(df[snr_col]):
+        ax_rank.text(value, y_idx, f" {fmt_snr_display(value)}", va="center", ha="left", fontsize=8)
 
-    ax_delta.plot(rank, df["snr_db"], marker="o", linewidth=2,
-                  color="#1f77b4", label="SNR (dB)")
-    ax_delta.bar(rank, df["delta_to_best_db"], alpha=0.25,
-                 color="#ff7f0e", label="Delta to best (dB)")
+    ax_delta.plot(rank, df[snr_col], marker="o", linewidth=2,
+                  color="#1f77b4", label=f"SNR ({unit_label})")
+    ax_delta.bar(rank, df["delta_to_best"], alpha=0.25,
+                 color="#ff7f0e", label=f"Delta to best ({unit_label})")
     ax_delta.set_xticks(rank)
     ax_delta.set_xticklabels([f"#{i}" for i in rank])
     ax_delta.set_title("SNR Spread Across Runs")
     ax_delta.set_xlabel("Rank (best to worst)")
-    ax_delta.set_ylabel("dB")
+    ax_delta.set_ylabel(unit_label)
     ax_delta.grid(alpha=0.25)
     ax_delta.legend(loc="best")
 
     scatter = ax_signal_noise.scatter(
         df["noise_sigma"], df["signal_amplitude"],
-        c=df["snr_db"], cmap="viridis", s=70, alpha=0.9,
+        c=df[snr_col], cmap="viridis", s=70, alpha=0.9,
     )
     ax_signal_noise.set_title("Signal vs Noise by Run")
     ax_signal_noise.set_xlabel("Noise sigma")
@@ -164,7 +205,7 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     for _, row in df.iterrows():
         ax_signal_noise.annotate(row["file"], (row["noise_sigma"], row["signal_amplitude"]),
                                   fontsize=7)
-    fig.colorbar(scatter, ax=ax_signal_noise, label="SNR (dB)")
+    fig.colorbar(scatter, ax=ax_signal_noise, label=f"SNR ({unit_label})")
 
     peak_points = []
     for i, (_, row) in enumerate(df.iterrows(), start=1):
@@ -198,7 +239,9 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         ax_peaks.set_xticklabels([f"#{i}" for i in rank])
         ax_peaks.set_title("Per-Peak SNR Distribution by Run")
         ax_peaks.set_xlabel("Run rank")
-        ax_peaks.set_ylabel("Peak SNR (dB)")
+        ax_peaks.set_ylabel(f"Peak SNR ({unit_label})")
+        if _use_linear_snr_display():
+            ax_peaks.axhline(1.0, color="#d62728", linestyle="--", linewidth=1.5, alpha=0.9)
         ax_peaks.grid(alpha=0.25)
         ax_peaks.legend(loc="best", title="Crack label")
     else:
@@ -276,13 +319,13 @@ def _build_tail_update(tail_length):
         else:
             point.set_data([x_vals[-1]], [y_vals[-1]])
 
-        for (pk_idx, pk_snr_db, pk_label), pk_marker, pk_text in zip(
+        for (pk_idx, pk_snr, pk_label), pk_marker, pk_text in zip(
                 peak_annotations, peak_markers, peak_texts):
             if pk_idx < len(x_vals) and frame >= pk_idx:
                 px, py = x_vals[pk_idx], y_vals[pk_idx]
                 pk_marker.set_data([px], [py])
                 pk_text.set_position((px, py))
-                pk_text.set_text(f"{pk_label} | {fmt_snr_db(pk_snr_db)}")
+                pk_text.set_text(f"{pk_label} | {fmt_snr_display(pk_snr)}")
                 pk_text.set_visible(True)
             else:
                 pk_marker.set_data([], [])
@@ -403,10 +446,10 @@ def create_overlay_animation(
         ax.axhline(y_floor - y_sigma, color=base_color, linestyle="--", linewidth=1.0, alpha=0.45)
         ax.axhline(y_floor + y_sigma, color=base_color, linestyle="--", linewidth=1.0, alpha=0.45)
 
-        snr_db         = get_snr_value_db(snr_df, filename)
+        snr_value      = get_snr_value_display(snr_df, filename)
         peak_count     = get_peak_count(snr_df, filename)
         peak_annotations = get_peak_annotations(snr_df, filename)
-        label = (f"{filename} | Crack SNR: {fmt_snr_db(snr_db)} | "
+        label = (f"{filename} | Crack SNR: {fmt_snr_display(snr_value)} | "
                  f"Peaks: {peak_count if peak_count is not None else 'n/a'}")
 
         tail_segments = LineCollection([], linewidths=2.0, zorder=2)
@@ -482,7 +525,7 @@ def create_stacked_animation(
     for i, ((filename, x_vals, y_vals), ax) in enumerate(zip(prepared, axes)):
         base_color       = color_map(i)
         peak_annotations = get_peak_annotations(snr_df, filename)
-        snr_db           = get_snr_value_db(snr_df, filename)
+        snr_value        = get_snr_value_display(snr_df, filename)
         peak_count       = get_peak_count(snr_df, filename)
 
         ax_x_min, ax_x_max = _compute_x_limits(x_vals, peak_annotations)
@@ -496,7 +539,7 @@ def create_stacked_animation(
         ax.grid(True, alpha=0.3)
         ax.text(
             0.01, 0.98,
-            f"Crack SNR: {fmt_snr_db(snr_db)}\n"
+            f"Crack SNR: {fmt_snr_display(snr_value)}\n"
             f"Detected peaks: {peak_count if peak_count is not None else 'n/a'}",
             transform=ax.transAxes, ha="left", va="top", fontsize=9, zorder=10,
             bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.7, "edgecolor": "none"},
@@ -586,7 +629,7 @@ def create_stacked_baseline_animation(
     for i, ((filename, x_vals, y_vals), ax) in enumerate(zip(prepared, axes)):
         base_color       = color_map(i)
         peak_annotations = get_peak_annotations(snr_df, filename)
-        snr_db           = get_snr_value_db(snr_df, filename)
+        snr_value        = get_snr_value_display(snr_df, filename)
         peak_count       = get_peak_count(snr_df, filename)
 
         ax_x_min, ax_x_max = _compute_x_limits(x_vals, peak_annotations)
@@ -598,7 +641,7 @@ def create_stacked_baseline_animation(
         ax.grid(True, alpha=0.3)
         ax.text(
             0.01, 0.98,
-            f"Crack SNR: {fmt_snr_db(snr_db)}\n"
+            f"Crack SNR: {fmt_snr_display(snr_value)}\n"
             f"Detected peaks: {peak_count if peak_count is not None else 'n/a'}",
             transform=ax.transAxes, ha="left", va="top", fontsize=9, zorder=10,
             bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.7, "edgecolor": "none"},
@@ -641,6 +684,302 @@ def create_stacked_baseline_animation(
 # ---------------------------------------------------------------------------
 # 3-D overlay animation (time × R_p × Inductance)
 # ---------------------------------------------------------------------------
+
+def _rotate_points_2d(points, degrees):
+    """Rotate 2D points by degrees."""
+    theta = np.radians(degrees)
+    c, s = np.cos(theta), np.sin(theta)
+    R = np.array(((c, -s), (s, c)))
+    return np.dot(points, R.T)
+
+
+def _rotate_yz_arrays(y_data, z_data, degrees, cy=0.0, cz=0.0, sy=1.0, sz=1.0):
+    """
+    Rotate (y, z) pairs by angle while preserving axis-scale behaviour.
+
+    Rotation is done in normalized space, then mapped back.
+    """
+    if len(y_data) == 0:
+        return np.asarray(y_data, dtype=float), np.asarray(z_data, dtype=float)
+
+    points = np.column_stack((np.asarray(y_data, dtype=float), np.asarray(z_data, dtype=float)))
+    centered = points - np.array([cy, cz], dtype=float)
+    normalized = centered / np.array([sy, sz], dtype=float)
+    rotated_norm = _rotate_points_2d(normalized, -degrees)
+    rotated = rotated_norm * np.array([sy, sz], dtype=float) + np.array([cy, cz], dtype=float)
+    return rotated[:, 0], rotated[:, 1]
+
+
+def _get_yz_rotation_params(y_vals, z_vals):
+    """Return center/scale parameters used for stable y/z rotation."""
+    if len(y_vals) == 0:
+        return 0.0, 0.0, 1.0, 1.0
+    cy = float(np.mean(y_vals))
+    cz = float(np.mean(z_vals))
+    sy = float(np.ptp(y_vals))
+    sz = float(np.ptp(z_vals))
+    return cy, cz, (sy if sy > 0 else 1.0), (sz if sz > 0 else 1.0)
+
+
+def create_interactive_raw_3d_transform_preview(
+    dataframes,
+    time_col="timestamp",
+    rp_col="sensor1_smooth",
+    ind_col="sensor2_smooth",
+    interval=30,
+    frame_step=1,
+    show_plot=True,
+):
+    """
+    Interactive real-time 3D preview of one CSV at a time.
+
+    Uses smoothed, non-rotated channels for visualization by default
+    (sensor1_smooth / sensor2_smooth). x-axis (time) stays fixed while
+    y/z are transformed with a live angle control.
+
+    Per file, pressing the "overwrite rotated data" button writes the
+    transformed y/z values into the rotated columns used downstream
+    (X_COL / Y_COL). Closing the window without pressing the button keeps
+    the existing rotated data from that CSV.
+    """
+    if not show_plot:
+        print("Skipping interactive raw 3D preview because show_plot=False.")
+        return
+
+    if not dataframes:
+        print("No dataframes available for interactive raw 3D preview.")
+        return
+
+    time_candidates = [time_col, "time", "sample", "index"]
+    rp_candidates = [rp_col, rp_col.strip(), "sensor1_smooth", " sensor1_smooth", "sensor1"]
+    ind_candidates = [ind_col, ind_col.strip(), "sensor2_smooth", " sensor2_smooth", "sensor2"]
+
+    any_valid = False
+
+    for file_idx, (filename, df) in enumerate(dataframes.items(), start=1):
+        t_col = resolve_first_existing_column(df, time_candidates)
+        y_col = resolve_first_existing_column(df, rp_candidates)
+        z_col = resolve_first_existing_column(df, ind_candidates)
+
+        if y_col is None or z_col is None:
+            print(f"Raw 3D preview: required columns not found in '{filename}', skipping.")
+            continue
+
+        t_series = pd.to_numeric(df[t_col], errors="coerce") if t_col else pd.Series(np.arange(len(df), dtype=float), index=df.index)
+        y_series = pd.to_numeric(df[y_col], errors="coerce")
+        z_series = pd.to_numeric(df[z_col], errors="coerce")
+        valid = t_series.notna() & y_series.notna() & z_series.notna()
+
+        if int(np.count_nonzero(valid.to_numpy())) < 3:
+            print(f"Raw 3D preview: insufficient numeric samples in '{filename}', skipping.")
+            continue
+
+        any_valid = True
+        t_vals = t_series[valid].to_numpy(dtype=float)
+        y_vals = y_series[valid].to_numpy(dtype=float)
+        z_vals = z_series[valid].to_numpy(dtype=float)
+        rot_params = _get_yz_rotation_params(y_vals, z_vals)
+
+        fig = plt.figure(figsize=(15, 8))
+        grid = fig.add_gridspec(1, 2, width_ratios=[1.7, 1.0])
+        ax = fig.add_subplot(grid[0, 0], projection="3d")
+        ax_plane = fig.add_subplot(grid[0, 1])
+        fig.subplots_adjust(bottom=0.21)
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel("R_p (smoothed)")
+        ax.set_zlabel("Inductance (smoothed)")
+        ax_plane.set_xlabel("R_p (smoothed, transformed)")
+        ax_plane.set_ylabel("Inductance (smoothed, transformed)")
+        ax_plane.set_title("Top-Down Y/Z Plane")
+        ax_plane.grid(alpha=0.25)
+
+        angle_state = {"deg": 0.0}
+        overwrite_state = {"selected": False}
+        base_color = plt.get_cmap("tab10", max(len(dataframes), 1))((file_idx - 1) % 10)
+
+        # Ghost trace for reference (smoothed, non-rotated source).
+        ax.plot(t_vals, y_vals, z_vals, color=base_color, linewidth=0.9, alpha=0.18)
+
+        y_rot0, z_rot0 = _rotate_yz_arrays(y_vals, z_vals, 0.0, *rot_params)
+        N_s = len(t_vals)
+        T_s = np.vstack([t_vals, t_vals])
+        Y_s = np.vstack([y_rot0, y_rot0])
+        z_floor0 = float(np.min(z_rot0))
+        Z_s = np.vstack([np.full(N_s, z_floor0), z_rot0])
+
+        surf = ax.plot_surface(
+            T_s,
+            Y_s,
+            Z_s,
+            facecolor=base_color,
+            alpha=0.14,
+            linewidth=0,
+            antialiased=False,
+        )
+        contour = ax.contourf(
+            T_s,
+            Y_s,
+            Z_s,
+            zdir="z",
+            offset=z_floor0,
+            levels=8,
+            colors=[base_color],
+            alpha=0.08,
+        )
+
+        line, = ax.plot([], [], [], color=base_color, linewidth=2.2, label=filename)
+        point, = ax.plot([], [], [], marker="o", ms=5, color=base_color, linestyle="none")
+        plane_ghost, = ax_plane.plot(y_vals, z_vals, color=base_color, linewidth=0.9, alpha=0.18)
+        plane_line, = ax_plane.plot([], [], color=base_color, linewidth=2.2)
+        plane_point, = ax_plane.plot([], [], marker="o", ms=5, color=base_color, linestyle="none")
+        y_pad = max(np.ptp(y_rot0) * 0.08, 1e-9)
+        z_pad = max(np.ptp(z_rot0) * 0.08, 1e-9)
+        ax_plane.set_xlim(np.min(y_rot0) - y_pad, np.max(y_rot0) + y_pad)
+        ax_plane.set_ylim(np.min(z_rot0) - z_pad, np.max(z_rot0) + z_pad)
+        ax.legend(loc="upper left", fontsize=8)
+
+        slider_ax = fig.add_axes([0.14, 0.09, 0.58, 0.035])
+        angle_slider = Slider(
+            slider_ax,
+            "Y/Z Transform (deg)",
+            -180.0,
+            180.0,
+            valinit=0.0,
+            valstep=0.1,
+        )
+
+        button_ax = fig.add_axes([0.75, 0.07, 0.2, 0.06])
+        overwrite_button = Button(button_ax, "overwrite rotated data")
+
+        fig.text(
+            0.02,
+            0.02,
+            "Close window to keep existing rotated data for this CSV.",
+            fontsize=9,
+            color="#222222",
+        )
+
+        def on_angle_change(val):
+            angle_state["deg"] = float(val)
+
+        def on_overwrite_click(_event):
+            overwrite_state["selected"] = True
+            plt.close(fig)
+
+        angle_slider.on_changed(on_angle_change)
+        overwrite_button.on_clicked(on_overwrite_click)
+
+        def init():
+            line.set_data([], [])
+            line.set_3d_properties([])
+            point.set_data([], [])
+            point.set_3d_properties([])
+            plane_line.set_data([], [])
+            plane_point.set_data([], [])
+            return []
+
+        def update(frame):
+            nonlocal surf, contour
+
+            angle_deg = angle_state["deg"]
+            last_idx = min(frame, len(t_vals) - 1)
+            if last_idx < 0:
+                return []
+
+            cy, cz, sy, sz = rot_params
+            y_rot, z_rot = _rotate_yz_arrays(y_vals, z_vals, angle_deg, cy, cz, sy, sz)
+
+            if surf is not None:
+                surf.remove()
+            if contour is not None:
+                if hasattr(contour, "remove"):
+                    contour.remove()
+                elif hasattr(contour, "collections"):
+                    for coll in contour.collections:
+                        coll.remove()
+
+            N_r = len(t_vals)
+            T_r = np.vstack([t_vals, t_vals])
+            Y_r = np.vstack([y_rot, y_rot])
+            z_floor = float(np.min(z_rot))
+            Z_r = np.vstack([np.full(N_r, z_floor), z_rot])
+
+            surf = ax.plot_surface(
+                T_r,
+                Y_r,
+                Z_r,
+                facecolor=base_color,
+                alpha=0.14,
+                linewidth=0,
+                antialiased=False,
+            )
+            contour = ax.contourf(
+                T_r,
+                Y_r,
+                Z_r,
+                zdir="z",
+                offset=z_floor,
+                levels=8,
+                colors=[base_color],
+                alpha=0.08,
+            )
+
+            t_seg = t_vals[: last_idx + 1]
+            y_seg = y_rot[: last_idx + 1]
+            z_seg = z_rot[: last_idx + 1]
+
+            line.set_data(t_seg, y_seg)
+            line.set_3d_properties(z_seg)
+            point.set_data([t_seg[-1]], [y_seg[-1]])
+            point.set_3d_properties([z_seg[-1]])
+            plane_line.set_data(y_seg, z_seg)
+            plane_point.set_data([y_seg[-1]], [z_seg[-1]])
+
+            y_pad_dyn = max(np.ptp(y_rot) * 0.08, 1e-9)
+            z_pad_dyn = max(np.ptp(z_rot) * 0.08, 1e-9)
+            ax_plane.set_xlim(np.min(y_rot) - y_pad_dyn, np.max(y_rot) + y_pad_dyn)
+            ax_plane.set_ylim(np.min(z_rot) - z_pad_dyn, np.max(z_rot) + z_pad_dyn)
+
+            ax.set_title(
+                f"{filename} | Smoothed non-rotated source | Angle: {angle_deg:.1f}°"
+            )
+            return []
+
+        anim = FuncAnimation(
+            fig,
+            update,
+            frames=range(0, len(t_vals), max(1, frame_step)),
+            init_func=init,
+            interval=interval,
+            blit=False,
+            repeat=True,
+        )
+
+        fig._raw_3d_preview_anim = anim
+        plt.show()
+
+        if overwrite_state["selected"]:
+            final_angle = float(angle_state["deg"])
+            y_rot_final, z_rot_final = _rotate_yz_arrays(y_vals, z_vals, final_angle, *rot_params)
+
+            if X_COL not in df.columns:
+                df[X_COL] = np.nan
+            if Y_COL not in df.columns:
+                df[Y_COL] = np.nan
+
+            df.loc[valid, X_COL] = y_rot_final
+            df.loc[valid, Y_COL] = z_rot_final
+            dataframes[filename] = df
+            print(
+                f"Applied overwrite for {filename}: wrote transformed data to '{X_COL}' and '{Y_COL}' at {final_angle:.1f}°."
+            )
+        else:
+            print(f"Kept existing rotated data for {filename}.")
+
+    if not any_valid:
+        print("No valid files for interactive raw 3D preview.")
+
 
 def create_3d_overlay_animation(
     dataframes,
@@ -721,7 +1060,7 @@ def create_3d_overlay_animation(
         N          = len(t_vals)
 
         peak_annotations = get_peak_annotations(snr_df, filename)
-        snr_db           = get_snr_value_db(snr_df, filename)
+        snr_value        = get_snr_value_display(snr_df, filename)
         peak_count       = get_peak_count(snr_df, filename)
 
         # Ghost trace for context
@@ -748,7 +1087,7 @@ def create_3d_overlay_animation(
         ax.add_collection3d(tail_col)
 
         # Moving point
-        label = (f"{filename} | SNR: {fmt_snr_db(snr_db)} | "
+        label = (f"{filename} | SNR: {fmt_snr_display(snr_value)} | "
                  f"Peaks: {peak_count if peak_count is not None else 'n/a'}")
         point, = ax.plot([], [], [], marker="o", ms=5,
                          color=base_color, zorder=3, label=label)
@@ -770,7 +1109,7 @@ def create_3d_overlay_animation(
         for (pk_idx, snr_val, lbl) in peak_annotations:
             if pk_idx < N:
                 pt = ax.text(t_vals[pk_idx], rp_vals[pk_idx], ind_vals[pk_idx],
-                             f"  {lbl}\n  {fmt_snr_db(snr_val)}",
+                             f"  {lbl}\n  {fmt_snr_display(snr_val)}",
                              fontsize=7, color=base_color, zorder=5, alpha=0.0)
             else:
                 pt = ax.text(0, 0, 0, "", fontsize=7, alpha=0.0)
@@ -928,7 +1267,7 @@ def create_3d_contour_plots(
                 pk_z   = np.array([ind_vals[pk] for pk, _, _  in valid_peaks])
                 ax.scatter(pk_t, pk_r, pk_z, color="red", s=60, zorder=6, depthshade=False)
                 for tx, rx, zx, (_, snr_val, lbl) in zip(pk_t, pk_r, pk_z, valid_peaks):
-                    ax.text(tx, rx, zx, f"  {lbl}\n  {fmt_snr_db(snr_val)}",
+                        ax.text(tx, rx, zx, f"  {lbl}\n  {fmt_snr_display(snr_val)}",
                             fontsize=7, color="red", zorder=7)
 
         ax.set_xlabel("Time (norm.)")

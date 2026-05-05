@@ -20,6 +20,11 @@ X_COL = "sensor1_smooth_rot"
 Y_COL = " sensor2_smooth_rot"   # leading space is intentional — matches CSV
 TIME_COL = "timestamp"
 
+# --- SNR display mode ------------------------------------------------------
+# Controls how SNR is shown across plots/animations.
+# Allowed values: "db" or "linear"
+SNR_DISPLAY_MODE = "linear"
+
 # --- Fallback column candidates --------------------------------------------
 # Searched in order when the exact column name is not known (e.g. raw signal
 # detection in the labeling step).

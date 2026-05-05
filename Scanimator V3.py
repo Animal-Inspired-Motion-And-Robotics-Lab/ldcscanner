@@ -36,6 +36,7 @@ from visualization import (
     create_overlay_animation,
     create_stacked_animation,
     create_stacked_baseline_animation,
+    create_interactive_raw_3d_transform_preview,
     create_3d_overlay_animation,
     create_3d_contour_plots,
 )
@@ -59,6 +60,16 @@ def main():
 
     run_output_dir = create_run_output_dir()
     print(f"Run output directory: {run_output_dir}")
+
+    # ── Step 0: interactive raw 3D preview with y/z transform control ────
+    create_interactive_raw_3d_transform_preview(
+        dataframes,
+        time_col=TIME_COL,
+        rp_col="sensor1_smooth",
+        ind_col="sensor2_smooth",
+        frame_step=FRAME_STEP,
+        show_plot=SHOW_PLOTS,
+    )
 
     # ── Step 1: manual crack-window labeling ──────────────────────────────
     labels_df = run_manual_raw_peak_labeling(
