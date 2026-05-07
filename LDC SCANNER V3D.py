@@ -61,6 +61,7 @@ PEAK_MIN_PROMINENCE = 0.1  # minimum height of peak above both flanks
 PEAK_HIGHLIGHT_FRAMES = 30  # how many update frames (~1.5 s) to keep peak green
 PEAK_VALLEY_WINDOW = 25  # max points to search on each side of peak for local troughs
 SURFACE_MAX_POINTS = 600
+SURFACE_DATA_MODE = "RAW"  # RAW or ROTATED for left 3D panel
 
 # last detected peak height (persists until a new peak is found)
 last_peak_s2 = float('nan')
@@ -162,12 +163,15 @@ def build_surface_data(x_vals, rp_vals, l_vals):
         return None
 
     def normalize_centered(vals):
-        v_min = float(np.min(vals))
-        v_max = float(np.max(vals))
-        span = v_max - v_min
-        if span <= 1e-12:
-            return np.zeros_like(vals, dtype=float), v_min, v_max
-        return ((vals - v_min) / span) - 0.5, v_min, v_max
+        # Robust scaling keeps each axis active even when outliers are present.
+        p_low = float(np.percentile(vals, 5.0))
+        p_high = float(np.percentile(vals, 95.0))
+        center = 0.5 * (p_low + p_high)
+        robust_span = p_high - p_low
+        std_span = float(np.std(vals)) * 6.0
+        span = max(robust_span, std_span, 1e-9)
+        norm = (vals - center) / span
+        return np.clip(norm, -0.5, 0.5), center, span
 
     x_norm, _, _ = normalize_centered(x_recent)
     y_norm, _, _ = normalize_centered(y_recent)
@@ -345,6 +349,17 @@ for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
 slider_layout = QtWidgets.QHBoxLayout()
 
 # Smooth window + min peak height stacked vertically
+surface_mode_label = QtWidgets.QLabel("3D data:")
+surface_mode_combo = QtWidgets.QComboBox()
+surface_mode_combo.addItems(["RAW", "ROTATED"])
+surface_mode_combo.setCurrentText(SURFACE_DATA_MODE)
+surface_mode_combo.setToolTip("Choose input for left 3D panel")
+def surface_mode_changed(text):
+    global SURFACE_DATA_MODE
+    SURFACE_DATA_MODE = text
+    surface_title.setText(f"3D Surface ({SURFACE_DATA_MODE}): Time (x), R_p (y), L (z)")
+surface_mode_combo.currentTextChanged.connect(surface_mode_changed)
+
 smooth_label = QtWidgets.QLabel(f"Smooth window: {SMOOTH_WINDOW}")
 smooth_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
 smooth_slider.setMinimum(1)
@@ -379,9 +394,15 @@ peak_prom_row.setContentsMargins(0, 0, 0, 0)
 peak_prom_row.addWidget(peak_prom_label)
 peak_prom_row.addWidget(peak_prom_slider)
 
+surface_mode_row = QtWidgets.QHBoxLayout()
+surface_mode_row.setContentsMargins(0, 0, 0, 0)
+surface_mode_row.addWidget(surface_mode_label)
+surface_mode_row.addWidget(surface_mode_combo)
+
 sliders_left_layout = QtWidgets.QVBoxLayout()
 sliders_left_layout.setContentsMargins(0, 0, 0, 0)
 sliders_left_layout.setSpacing(2)
+sliders_left_layout.addLayout(surface_mode_row)
 sliders_left_layout.addLayout(smooth_row)
 sliders_left_layout.addLayout(peak_prom_row)
 
@@ -507,13 +528,39 @@ main_widget.show()
 # KEY HANDLER
 # -------------------------
 def keyPressEvent(event):
-    global paused, xy_start_index
+    global paused, xy_start_index, last_peak_s2, peak_highlight_frames, peak_abs_left, peak_abs_right
+    global latest_average_text, last_average_update_time
     if event.key() == QtCore.Qt.Key_Space:
-        xy_start_index = len(sensor1)
+        # Clear all buffered data so both plots restart from a clean state.
+        timestamps.clear()
+        sensor1.clear()
+        sensor2.clear()
+        xy_start_index = 0
+
+        # Reset left 3D plot.
+        surface_meshdata = gl.MeshData(vertexes=_bootstrap_vertices, faces=_bootstrap_faces)
+        surface_meshdata.setFaceColors(_bootstrap_face_colors)
+        surface_item.setMeshData(meshdata=surface_meshdata)
+        surface_trace.setData(pos=np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
+        surface_head.setData(pos=np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
+        surface_view.opts['center'] = QtGui.QVector3D(0.0, 0.0, 0.0)
+
+        # Reset right XY plot.
         xy_curve.clear()
         for seg_curve in recent_segment_curves:
             seg_curve.setData([], [])
         plot_xy.enableAutoRange()
+        plot_xy.autoRange()
+
+        # Reset peak/average labels.
+        last_peak_s2 = float('nan')
+        peak_highlight_frames = 0
+        peak_abs_left = -1
+        peak_abs_right = -1
+        peak_label.setText("Peak (vertical): --")
+        latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
+        average_label.setText(latest_average_text)
+        last_average_update_time = time.monotonic()
     elif event.key() == QtCore.Qt.Key_P:
         paused = not paused
         if paused:
@@ -593,8 +640,14 @@ def update():
     y2_s = moving_average(y2, SMOOTH_WINDOW)
     x_s = x[-len(y1_s):]
 
-    # Live 3D surface from timestamp (x), R_p (y), and inductance L (z).
-    surface_data = build_surface_data(x_s, y1_s, y2_s)
+    # Live 3D surface source is selectable: raw channels or rotated channels.
+    surface_rp = y1
+    surface_l = y2
+    if SURFACE_DATA_MODE == "ROTATED":
+        rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s = get_rotation_params(y1_s, y2_s)
+        surface_rp, surface_l = rotate_xy_arrays(y1, y2, ROTATION_ANGLE, rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s)
+
+    surface_data = build_surface_data(x, surface_rp, surface_l)
     if surface_data is not None:
         vertices, faces, face_colors, line_pos = surface_data
         meshdata = gl.MeshData(vertexes=vertices, faces=faces)
