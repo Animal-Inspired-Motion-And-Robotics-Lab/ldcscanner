@@ -41,7 +41,6 @@ from visualization import (
     create_3d_contour_plots,
 )
 
-
 def main():
     print("CSV Loader + Animation + SNR Analysis")
     print("-" * 40)
