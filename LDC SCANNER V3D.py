@@ -5,7 +5,8 @@ import os
 import time
 from collections import deque
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets, QtCore
+import pyqtgraph.opengl as gl
+from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 
 pg.setConfigOptions(antialias=True)
 
@@ -59,6 +60,7 @@ PEAK_SLOPE_WINDOW = 5    # consecutive points that must be rising before AND fal
 PEAK_MIN_PROMINENCE = 0.1  # minimum height of peak above both flanks
 PEAK_HIGHLIGHT_FRAMES = 30  # how many update frames (~1.5 s) to keep peak green
 PEAK_VALLEY_WINDOW = 25  # max points to search on each side of peak for local troughs
+SURFACE_MAX_POINTS = 600
 
 # last detected peak height (persists until a new peak is found)
 last_peak_s2 = float('nan')
@@ -149,6 +151,60 @@ def get_rotation_params(y1_plot, y2_plot):
         return rot_cx, rot_cy, rot_sx, rot_sy
     return 0.0, 0.0, 1.0, 1.0
 
+def build_surface_data(x_vals, rp_vals, l_vals):
+    if len(x_vals) < 2:
+        return None
+
+    x_recent = np.asarray(x_vals[-SURFACE_MAX_POINTS:], dtype=float)
+    y_recent = np.asarray(rp_vals[-SURFACE_MAX_POINTS:], dtype=float)
+    z_recent = np.asarray(l_vals[-SURFACE_MAX_POINTS:], dtype=float)
+    if len(x_recent) < 2:
+        return None
+
+    def normalize_centered(vals):
+        v_min = float(np.min(vals))
+        v_max = float(np.max(vals))
+        span = v_max - v_min
+        if span <= 1e-12:
+            return np.zeros_like(vals, dtype=float), v_min, v_max
+        return ((vals - v_min) / span) - 0.5, v_min, v_max
+
+    x_norm, _, _ = normalize_centered(x_recent)
+    y_norm, _, _ = normalize_centered(y_recent)
+    z_norm, _, _ = normalize_centered(z_recent)
+
+    z_floor = -0.5
+    n = len(x_recent)
+
+    # Build a ribbon "curtain" mesh between the live trace and a floor plane.
+    vertices = np.empty((2 * n, 3), dtype=np.float32)
+    vertices[0::2, 0] = x_norm
+    vertices[0::2, 1] = y_norm
+    vertices[0::2, 2] = z_floor
+    vertices[1::2, 0] = x_norm
+    vertices[1::2, 1] = y_norm
+    vertices[1::2, 2] = z_norm
+
+    faces = np.empty((2 * (n - 1), 3), dtype=np.uint32)
+    for i in range(n - 1):
+        b = 2 * i
+        faces[2 * i] = [b, b + 1, b + 2]
+        faces[2 * i + 1] = [b + 1, b + 3, b + 2]
+
+    z_color = z_norm + 0.5
+
+    face_colors = np.empty((faces.shape[0], 4), dtype=np.float32)
+    for i in range(n - 1):
+        c = float(0.5 * (z_color[i] + z_color[i + 1]))
+        r = 0.1 + 0.9 * c
+        g = 0.5 * (1.0 - c)
+        b = 1.0 - 0.8 * c
+        face_colors[2 * i] = [r, g, b, 0.32]
+        face_colors[2 * i + 1] = [r, g, b, 0.32]
+
+    line_pos = np.column_stack((x_norm, y_norm, z_norm)).astype(np.float32)
+    return vertices, faces, face_colors, line_pos
+
 class ResettableDial(QtWidgets.QDial):
     """Dial that uses relative drag instead of click-to-jump, with scroll-wheel fine control."""
     def __init__(self, *args, **kwargs):
@@ -198,49 +254,83 @@ main_layout = QtWidgets.QVBoxLayout(main_widget)
 main_layout.setContentsMargins(6, 6, 6, 6)
 main_layout.setSpacing(6)
 
-win = pg.GraphicsLayoutWidget()
-main_layout.addWidget(win, 1)
+# Top row holds the live 3D surface (left) and phase-space plot (right).
+top_row_layout = QtWidgets.QHBoxLayout()
+top_row_layout.setContentsMargins(0, 0, 0, 0)
+top_row_layout.setSpacing(6)
+main_layout.addLayout(top_row_layout, 1)
 
-win.setFocusPolicy(QtCore.Qt.StrongFocus)
-win.setFocus()
+surface_container = QtWidgets.QWidget()
+surface_layout = QtWidgets.QVBoxLayout(surface_container)
+surface_layout.setContentsMargins(0, 0, 0, 0)
+surface_layout.setSpacing(2)
+surface_title = QtWidgets.QLabel("3D Surface: Time (x), R_p (y), L (z)")
+surface_layout.addWidget(surface_title)
 
-# -------------------------
-# LEFT PLOT (TIME SERIES)
-# -------------------------
-plot_time = win.addPlot(title="Sensors vs Time")
+surface_view = gl.GLViewWidget()
+surface_view.setMinimumSize(520, 340)
+surface_view.opts['distance'] = 2.8
+surface_view.opts['elevation'] = 22
+surface_view.opts['azimuth'] = -35
+surface_layout.addWidget(surface_view, 1)
 
-# Remove default labels (we'll use colored TextItems)
-plot_time.setLabel('left', '')
-plot_time.setLabel('right', '')
-plot_time.setLabel('bottom', 'Time')
-plot_time.getAxis('left').setPen('w')
-plot_time.getAxis('right').setPen('w')
-plot_time.getAxis('bottom').setPen('w')
+surface_grid = gl.GLGridItem()
+surface_grid.setSize(1.4, 1.4)
+surface_grid.setSpacing(0.1, 0.1)
+surface_view.addItem(surface_grid)
 
-curve1 = plot_time.plot(pen='y')
-plot_time.showAxis('right')
-p2 = pg.ViewBox()
-plot_time.scene().addItem(p2)
-plot_time.getAxis('right').linkToView(p2)
-p2.setXLink(plot_time)
-curve2 = pg.PlotCurveItem(pen='c')
-p2.addItem(curve2)
+surface_axis = gl.GLAxisItem()
+surface_axis.setSize(1.0, 1.0, 1.0)
+surface_view.addItem(surface_axis)
 
-def updateViews():
-    p2.setGeometry(plot_time.vb.sceneBoundingRect())
-    p2.linkedViewChanged(plot_time.vb, p2.XAxis)
-plot_time.vb.sigResized.connect(updateViews)
+_bootstrap_vertices = np.array(
+    [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+_bootstrap_faces = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
+_bootstrap_face_colors = np.array(
+    [[0.2, 0.6, 1.0, 0.32], [0.2, 0.6, 1.0, 0.32]],
+    dtype=np.float32,
+)
 
-# Add custom colored axis labels as TextItems
-label_left = pg.TextItem("R_p (ohm)", color=(255, 255, 0))   # yellow
-label_right = pg.TextItem("L (uH)", color=(0, 255, 255))  # cyan
-plot_time.addItem(label_left)
-plot_time.addItem(label_right)
+surface_meshdata = gl.MeshData(vertexes=_bootstrap_vertices, faces=_bootstrap_faces)
+surface_meshdata.setFaceColors(_bootstrap_face_colors)
+surface_item = gl.GLMeshItem(meshdata=surface_meshdata, smooth=False, drawEdges=False, drawFaces=True)
+surface_item.setGLOptions('translucent')
+surface_view.addItem(surface_item)
+
+surface_trace = gl.GLLinePlotItem(
+    pos=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]], dtype=np.float32),
+    color=(1.0, 0.65, 0.2, 1.0),
+    width=2.0,
+    antialias=True,
+    mode='line_strip',
+)
+surface_view.addItem(surface_trace)
+
+surface_head = gl.GLScatterPlotItem(
+    pos=np.array([[1.0, 0.0, 1.0]], dtype=np.float32),
+    color=(1.0, 1.0, 1.0, 1.0),
+    size=8.0,
+)
+surface_view.addItem(surface_head)
+
+top_row_layout.addWidget(surface_container, 1)
 
 # -------------------------
 # RIGHT PLOT (XY)
 # -------------------------
-win.nextColumn()
+win = pg.GraphicsLayoutWidget()
+top_row_layout.addWidget(win, 1)
+
+win.setFocusPolicy(QtCore.Qt.StrongFocus)
+win.setFocus()
+
 plot_xy = win.addPlot(title="Phase Space")
 plot_xy.setLabel('bottom', 'R_p (ohm)')
 plot_xy.setLabel('left', 'L (uH)')
@@ -252,7 +342,6 @@ for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
 # -------------------------
 # SLIDERS
 # -------------------------
-win.nextRow()
 slider_layout = QtWidgets.QHBoxLayout()
 
 # Smooth window + min peak height stacked vertically
@@ -504,15 +593,16 @@ def update():
     y2_s = moving_average(y2, SMOOTH_WINDOW)
     x_s = x[-len(y1_s):]
 
-    # Update custom axis label positions dynamically
-    if len(y1_s):
-        label_left.setPos(x_s[0], y1_s[-1])
-    if len(y2_s):
-        label_right.setPos(x_s[0], y2_s[-1])
-
-    # time plot
-    curve1.setData(x_s, y1_s)
-    curve2.setData(x_s, y2_s)
+    # Live 3D surface from timestamp (x), R_p (y), and inductance L (z).
+    surface_data = build_surface_data(x_s, y1_s, y2_s)
+    if surface_data is not None:
+        vertices, faces, face_colors, line_pos = surface_data
+        meshdata = gl.MeshData(vertexes=vertices, faces=faces)
+        meshdata.setFaceColors(face_colors)
+        surface_item.setMeshData(meshdata=meshdata)
+        surface_trace.setData(pos=line_pos)
+        surface_head.setData(pos=line_pos[-1:].copy())
+        surface_view.opts['center'] = QtGui.QVector3D(0.0, 0.0, 0.0)
 
     # clear previous text labels on XY plot
     for item in plot_xy.items[:]:
