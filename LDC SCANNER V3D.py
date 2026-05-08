@@ -62,6 +62,7 @@ PEAK_HIGHLIGHT_FRAMES = 30  # how many update frames (~1.5 s) to keep peak green
 PEAK_VALLEY_WINDOW = 25  # max points to search on each side of peak for local troughs
 SURFACE_MAX_POINTS = 600
 SURFACE_DATA_MODE = "RAW"  # RAW or ROTATED for left 3D panel
+SURFACE_SMOOTH_MODE = "UNSMOOTHED"  # UNSMOOTHED or SMOOTHED input for left 3D panel
 
 # last detected peak height (persists until a new peak is found)
 last_peak_s2 = float('nan')
@@ -350,15 +351,44 @@ slider_layout = QtWidgets.QHBoxLayout()
 
 # Smooth window + min peak height stacked vertically
 surface_mode_label = QtWidgets.QLabel("3D data:")
-surface_mode_combo = QtWidgets.QComboBox()
-surface_mode_combo.addItems(["RAW", "ROTATED"])
-surface_mode_combo.setCurrentText(SURFACE_DATA_MODE)
-surface_mode_combo.setToolTip("Choose input for left 3D panel")
-def surface_mode_changed(text):
+surface_mode_switch = QtWidgets.QCheckBox()
+surface_mode_switch.setChecked(SURFACE_DATA_MODE == "ROTATED")
+surface_mode_switch.setToolTip("Toggle RAW/ROTATED for left 3D panel")
+surface_mode_switch.setStyleSheet(
+    "QCheckBox::indicator { width: 36px; height: 20px; border-radius: 10px;"
+    " border: 1px solid #666; background: #2b2b2b; }"
+    "QCheckBox::indicator:checked { background: #27ae60; border: 1px solid #1e8449; }"
+)
+surface_mode_value_label = QtWidgets.QLabel("ROTATED" if SURFACE_DATA_MODE == "ROTATED" else "RAW")
+surface_mode_value_label.setMinimumWidth(60)
+
+def surface_mode_toggled(checked):
     global SURFACE_DATA_MODE
-    SURFACE_DATA_MODE = text
+    SURFACE_DATA_MODE = "ROTATED" if checked else "RAW"
+    surface_mode_value_label.setText(SURFACE_DATA_MODE)
     surface_title.setText(f"3D Surface ({SURFACE_DATA_MODE}): Time (x), R_p (y), L (z)")
-surface_mode_combo.currentTextChanged.connect(surface_mode_changed)
+
+surface_mode_switch.toggled.connect(surface_mode_toggled)
+
+# Smoothed vs Raw toggle for left 3D panel
+surface_smooth_label = QtWidgets.QLabel("3D input:")
+surface_smooth_switch = QtWidgets.QCheckBox()
+surface_smooth_switch.setChecked(SURFACE_SMOOTH_MODE == "SMOOTHED")
+surface_smooth_switch.setToolTip("Toggle UNSMOOTHED/SMOOTHED input for left 3D panel")
+surface_smooth_switch.setStyleSheet(
+    "QCheckBox::indicator { width: 36px; height: 20px; border-radius: 10px;"
+    " border: 1px solid #666; background: #2b2b2b; }"
+    "QCheckBox::indicator:checked { background: #27ae60; border: 1px solid #1e8449; }"
+)
+surface_smooth_value_label = QtWidgets.QLabel("SMOOTHED" if SURFACE_SMOOTH_MODE == "SMOOTHED" else "UNSMOOTHED")
+surface_smooth_value_label.setMinimumWidth(68)
+
+def surface_smooth_toggled(checked):
+    global SURFACE_SMOOTH_MODE
+    SURFACE_SMOOTH_MODE = "SMOOTHED" if checked else "UNSMOOTHED"
+    surface_smooth_value_label.setText(SURFACE_SMOOTH_MODE)
+
+surface_smooth_switch.toggled.connect(surface_smooth_toggled)
 
 smooth_label = QtWidgets.QLabel(f"Smooth window: {SMOOTH_WINDOW}")
 smooth_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -397,12 +427,20 @@ peak_prom_row.addWidget(peak_prom_slider)
 surface_mode_row = QtWidgets.QHBoxLayout()
 surface_mode_row.setContentsMargins(0, 0, 0, 0)
 surface_mode_row.addWidget(surface_mode_label)
-surface_mode_row.addWidget(surface_mode_combo)
+surface_mode_row.addWidget(surface_mode_switch)
+surface_mode_row.addWidget(surface_mode_value_label)
+
+surface_smooth_row = QtWidgets.QHBoxLayout()
+surface_smooth_row.setContentsMargins(0, 0, 0, 0)
+surface_smooth_row.addWidget(surface_smooth_label)
+surface_smooth_row.addWidget(surface_smooth_switch)
+surface_smooth_row.addWidget(surface_smooth_value_label)
 
 sliders_left_layout = QtWidgets.QVBoxLayout()
 sliders_left_layout.setContentsMargins(0, 0, 0, 0)
 sliders_left_layout.setSpacing(2)
 sliders_left_layout.addLayout(surface_mode_row)
+sliders_left_layout.addLayout(surface_smooth_row)
 sliders_left_layout.addLayout(smooth_row)
 sliders_left_layout.addLayout(peak_prom_row)
 
@@ -522,6 +560,8 @@ slider_layout.addWidget(write_controls_container)
 slider_container = QtWidgets.QWidget()
 slider_container.setLayout(slider_layout)
 main_layout.addWidget(slider_container, 0)
+main_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
+main_widget.setFocus()
 main_widget.show()
 
 # -------------------------
@@ -569,8 +609,25 @@ def keyPressEvent(event):
     elif event.key() == QtCore.Qt.Key_F:
         write_toggle_button.setChecked(not write_toggle_button.isChecked())
         print("CSV write ON" if write_toggle_button.isChecked() else "CSV write OFF")
+    elif event.key() == QtCore.Qt.Key_1:
+        # Top-down view: look straight down the Z axis.
+        surface_view.opts['elevation'] = 90
+        surface_view.opts['azimuth'] = 0
+        surface_view.update()
+    elif event.key() == QtCore.Qt.Key_2:
+        # Front view: look along the Y axis from the front.
+        surface_view.opts['elevation'] = 0
+        surface_view.opts['azimuth'] = 0
+        surface_view.update()
+    elif event.key() == QtCore.Qt.Key_3:
+        # Left side view: look along the X axis from the left.
+        surface_view.opts['elevation'] = 0
+        surface_view.opts['azimuth'] = 90
+        surface_view.update()
 
+main_widget.keyPressEvent = keyPressEvent
 win.keyPressEvent = keyPressEvent
+surface_view.keyPressEvent = keyPressEvent
 
 # -------------------------
 # SERIAL READ
@@ -640,14 +697,23 @@ def update():
     y2_s = moving_average(y2, SMOOTH_WINDOW)
     x_s = x[-len(y1_s):]
 
-    # Live 3D surface source is selectable: raw channels or rotated channels.
-    surface_rp = y1
-    surface_l = y2
-    if SURFACE_DATA_MODE == "ROTATED":
-        rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s = get_rotation_params(y1_s, y2_s)
-        surface_rp, surface_l = rotate_xy_arrays(y1, y2, ROTATION_ANGLE, rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s)
+    # Live 3D surface source: choose smoothed or raw, then raw or rotated.
+    if SURFACE_SMOOTH_MODE == "SMOOTHED":
+        surface_base_rp = y1_s
+        surface_base_l = y2_s
+        surface_base_x = x_s
+    else:
+        surface_base_rp = y1
+        surface_base_l = y2
+        surface_base_x = x
 
-    surface_data = build_surface_data(x, surface_rp, surface_l)
+    surface_rp = surface_base_rp
+    surface_l = surface_base_l
+    if SURFACE_DATA_MODE == "ROTATED":
+        rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s = get_rotation_params(surface_base_rp, surface_base_l)
+        surface_rp, surface_l = rotate_xy_arrays(surface_base_rp, surface_base_l, ROTATION_ANGLE, rot_cx_s, rot_cy_s, rot_sx_s, rot_sy_s)
+
+    surface_data = build_surface_data(surface_base_x, surface_rp, surface_l)
     if surface_data is not None:
         vertices, faces, face_colors, line_pos = surface_data
         meshdata = gl.MeshData(vertexes=vertices, faces=faces)
