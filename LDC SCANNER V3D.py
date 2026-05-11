@@ -13,7 +13,7 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIGS
 # ------------------------- 
-SERIAL_PORT = "COM6"   
+SERIAL_PORT = "COM9"   
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
@@ -288,6 +288,17 @@ surface_axis = gl.GLAxisItem()
 surface_axis.setSize(1.0, 1.0, 1.0)
 surface_view.addItem(surface_axis)
 
+_axis_font = QtGui.QFont('Helvetica', 11, QtGui.QFont.Bold)
+_label_x = gl.GLTextItem(pos=np.array([0.56, 0.0, 0.0], dtype=float),
+                          text='Time', color=QtGui.QColor(255, 80, 80), font=_axis_font)
+_label_y = gl.GLTextItem(pos=np.array([0.0, 0.56, 0.0], dtype=float),
+                          text='R_p', color=QtGui.QColor(80, 200, 80), font=_axis_font)
+_label_z = gl.GLTextItem(pos=np.array([0.0, 0.0, 0.56], dtype=float),
+                          text='L', color=QtGui.QColor(80, 160, 255), font=_axis_font)
+surface_view.addItem(_label_x)
+surface_view.addItem(_label_y)
+surface_view.addItem(_label_z)
+
 _bootstrap_vertices = np.array(
     [
         [0.0, 0.0, 0.0],
@@ -339,6 +350,7 @@ win.setFocus()
 plot_xy = win.addPlot(title="Phase Space")
 plot_xy.setLabel('bottom', 'R_p (ohm)')
 plot_xy.setLabel('left', 'L (uH)')
+initial_xy_view_state = plot_xy.getViewBox().getState(copy=True)
 xy_curve = plot_xy.plot(pen='r')
 recent_segment_curves = []
 for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
@@ -589,8 +601,7 @@ def keyPressEvent(event):
         xy_curve.clear()
         for seg_curve in recent_segment_curves:
             seg_curve.setData([], [])
-        plot_xy.enableAutoRange()
-        plot_xy.autoRange()
+        plot_xy.getViewBox().setState(initial_xy_view_state)
 
         # Reset peak/average labels.
         last_peak_s2 = float('nan')
@@ -632,6 +643,24 @@ surface_view.keyPressEvent = keyPressEvent
 # -------------------------
 # SERIAL READ
 # -------------------------
+def parse_serial_line(line):
+    if not line:
+        raise ValueError("Empty serial line")
+
+    if ">" in line and ":" in line:
+        fields = {}
+        payload = line.split("|", 1)[0]
+        for segment in payload.split(">"):
+            if not segment or ":" not in segment:
+                continue
+            key, value = segment.split(":", 1)
+            fields[key.strip().lower()] = float(value.strip())
+
+        return fields["t"], fields["rp"], fields["l"]
+
+    t, s1, s2 = map(float, line.split())
+    return t, s1, s2
+
 def read_serial():
     global latest_readout_text, write_to_file_enabled
     if paused:
@@ -640,7 +669,7 @@ def read_serial():
     while ser.in_waiting:
         line = ser.readline().decode(errors='ignore').strip()
         try:
-            t, s1, s2 = map(float, line.split())
+            t, s1, s2 = parse_serial_line(line)
             timestamps.append(t)
             sensor1.append(s1)
             sensor2.append(s2)
