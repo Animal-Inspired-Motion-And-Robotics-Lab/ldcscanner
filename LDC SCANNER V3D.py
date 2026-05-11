@@ -61,6 +61,8 @@ PEAK_MIN_PROMINENCE = 0.1  # minimum height of peak above both flanks
 PEAK_HIGHLIGHT_FRAMES = 30  # how many update frames (~1.5 s) to keep peak green
 PEAK_VALLEY_WINDOW = 25  # max points to search on each side of peak for local troughs
 SURFACE_MAX_POINTS = 600
+SURFACE_MAX_POINTS_MIN = SURFACE_MAX_POINTS
+SURFACE_MAX_POINTS_MAX = SURFACE_MAX_POINTS * 10
 SURFACE_DATA_MODE = "RAW"  # RAW or ROTATED for left 3D panel
 SURFACE_SMOOTH_MODE = "UNSMOOTHED"  # UNSMOOTHED or SMOOTHED input for left 3D panel
 
@@ -413,6 +415,19 @@ def smooth_changed(value):
     smooth_label.setText(f"Smooth window: {SMOOTH_WINDOW}")
 smooth_slider.valueChanged.connect(smooth_changed)
 
+surface_points_label = QtWidgets.QLabel(f"3D points: {SURFACE_MAX_POINTS}")
+surface_points_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+surface_points_slider.setMinimum(SURFACE_MAX_POINTS_MIN)
+surface_points_slider.setMaximum(SURFACE_MAX_POINTS_MAX)
+surface_points_slider.setValue(SURFACE_MAX_POINTS)
+surface_points_slider.setSingleStep(50)
+surface_points_slider.setPageStep(300)
+def surface_points_changed(value):
+    global SURFACE_MAX_POINTS
+    SURFACE_MAX_POINTS = int(value)
+    surface_points_label.setText(f"3D points: {SURFACE_MAX_POINTS}")
+surface_points_slider.valueChanged.connect(surface_points_changed)
+
 # Min peak height slider: 0.001 – 1.0 in steps of 0.001 (stored as int * 1000)
 _PEAK_PROM_SCALE = 1000
 peak_prom_label = QtWidgets.QLabel(f"Min peak height: {PEAK_MIN_PROMINENCE:.3f} µH")
@@ -430,6 +445,11 @@ smooth_row = QtWidgets.QHBoxLayout()
 smooth_row.setContentsMargins(0, 0, 0, 0)
 smooth_row.addWidget(smooth_label)
 smooth_row.addWidget(smooth_slider)
+
+surface_points_row = QtWidgets.QHBoxLayout()
+surface_points_row.setContentsMargins(0, 0, 0, 0)
+surface_points_row.addWidget(surface_points_label)
+surface_points_row.addWidget(surface_points_slider)
 
 peak_prom_row = QtWidgets.QHBoxLayout()
 peak_prom_row.setContentsMargins(0, 0, 0, 0)
@@ -453,6 +473,7 @@ sliders_left_layout.setContentsMargins(0, 0, 0, 0)
 sliders_left_layout.setSpacing(2)
 sliders_left_layout.addLayout(surface_mode_row)
 sliders_left_layout.addLayout(surface_smooth_row)
+sliders_left_layout.addLayout(surface_points_row)
 sliders_left_layout.addLayout(smooth_row)
 sliders_left_layout.addLayout(peak_prom_row)
 
