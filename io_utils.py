@@ -193,3 +193,71 @@ def save_cached_windows(cache_path, fingerprint, windows):
     ]
 
     pd.DataFrame(rows).to_csv(cache_path, index=False)
+
+
+# ---------------------------------------------------------------------------
+# Rotation cache — persist selected 3D transform angle across runs
+# ---------------------------------------------------------------------------
+
+def get_rotation_cache_path(cache_dir, source_path):
+    """Map a source file path to a stable cache filename for rotation angle."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha1(str(Path(source_path).resolve()).encode()).hexdigest()[:12]
+    stem = Path(source_path).stem
+    safe_stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem)
+    return cache_dir / f"{safe_stem}_{digest}_rotation.csv"
+
+
+
+def load_cached_rotation(cache_path, fingerprint):
+    """Return cached (rotation angle, smoothing window) if present and fingerprint matches."""
+    if fingerprint is None or not cache_path.exists():
+        return None
+
+    try:
+        cached_df = pd.read_csv(cache_path)
+    except Exception:
+        return None
+
+    required_cols = ["source_path", "file_size", "mtime_ns", "rotation_degrees"]
+    if any(col not in cached_df.columns for col in required_cols) or cached_df.empty:
+        return None
+
+    row = cached_df.iloc[0]
+    if not (
+        str(row.get("source_path", "")) == str(fingerprint["source_path"])
+        and int(row.get("file_size", -1)) == int(fingerprint["file_size"])
+        and int(row.get("mtime_ns", -1)) == int(fingerprint["mtime_ns"])
+    ):
+        return None
+
+    angle = row.get("rotation_degrees")
+    smooth = row.get("smoothing_window") if "smoothing_window" in row else None
+    if pd.isna(angle):
+        return None
+    try:
+        if smooth is not None and not pd.isna(smooth):
+            return float(angle), int(smooth)
+        else:
+            return float(angle)
+    except (TypeError, ValueError):
+        return None
+
+
+
+def save_cached_rotation(cache_path, fingerprint, rotation_degrees, smoothing_window=None):
+    """Persist selected rotation angle and smoothing window for future runs."""
+    if fingerprint is None:
+        return
+
+    row = {
+        "source_path": str(fingerprint["source_path"]),
+        "file_size": int(fingerprint["file_size"]),
+        "mtime_ns": int(fingerprint["mtime_ns"]),
+        "rotation_degrees": float(rotation_degrees),
+    }
+    if smoothing_window is not None:
+        row["smoothing_window"] = int(smoothing_window)
+    pd.DataFrame([row]).to_csv(cache_path, index=False)

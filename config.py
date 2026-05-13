@@ -16,14 +16,18 @@ SAVE_GIFS = True
 # --- Sensor column names ---------------------------------------------------
 
 # Edit these if the CSV headers change.
-X_COL = "sensor1_smooth_rot"
-Y_COL = " sensor2_smooth_rot"   # leading space is intentional — matches CSV
+X_COL = "sensor1"
+Y_COL = " sensor2"   # leading space is intentional — matches CSV
 TIME_COL = "timestamp"
 
 # --- SNR display mode ------------------------------------------------------
 # Controls how SNR is shown across plots/animations.
 # Allowed values: "db" or "linear"
 SNR_DISPLAY_MODE = "linear"
+
+# Controls grouping in static SNR charts only (analysis remains per-file).
+# Allowed values: "grouped" or "per_file"
+SNR_CHART_GROUP_MODE = "grouped"
 
 # --- Fallback column candidates --------------------------------------------
 # Searched in order when the exact column name is not known (e.g. raw signal

@@ -76,10 +76,19 @@ peak_abs_right = -1  # abs index in y2_rot of the peak's right flank
 # SMOOTHING FUNCTION
 # -------------------------
 def moving_average(data, window):
-    if len(data) < window:
-        return np.array(data)
-    kernel = np.ones(window) / window
-    return np.convolve(data, kernel, mode="valid")
+    arr = np.asarray(data, dtype=float)
+    w = int(window)
+    if len(arr) == 0 or w <= 1:
+        return arr
+    if w > len(arr):
+        w = len(arr)
+
+    # Edge padding prevents artificial dips/spikes at the start and end.
+    left = w // 2
+    right = w - 1 - left
+    padded = np.pad(arr, (left, right), mode="edge")
+    kernel = np.ones(w, dtype=float) / float(w)
+    return np.convolve(padded, kernel, mode="valid")
 
 def detect_last_peak(data):
     """Return the most recent qualified peak as (height, peak_i, left_i, right_i).
@@ -710,8 +719,8 @@ def read_serial():
                 csv_writer.writerow([t, s1, s2, s1_smooth, s2_smooth, float(s1_rot[0]), float(s2_rot[0]), ROTATION_ANGLE])
                 csv_file.flush()
             latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f}"
-        except:
-            pass
+        except (ValueError, KeyError):
+            continue
 
 # -------------------------
 # UPDATE LOOP
