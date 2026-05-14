@@ -13,7 +13,7 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIGS
 # ------------------------- 
-SERIAL_PORT = "COM9"   
+SERIAL_PORT = "COM6"   
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
@@ -52,6 +52,7 @@ xy_start_index = 0
 
 # adjustable parameters
 SMOOTH_WINDOW = 10
+DISPLAY_LAG_POINTS = 1  # skip newest N points in plots to reduce right-edge jitter
 ROTATION_ANGLE = 0.0  # degrees; applied to XY phase-space plot
 RECENT_FADE_POINTS = 100
 AVERAGE_UPDATE_INTERVAL_SEC = 5.0
@@ -88,7 +89,11 @@ def moving_average(data, window):
     right = w - 1 - left
     padded = np.pad(arr, (left, right), mode="edge")
     kernel = np.ones(w, dtype=float) / float(w)
-    return np.convolve(padded, kernel, mode="valid")
+    smoothed = np.convolve(padded, kernel, mode="valid")
+
+    # Keep the newest point causal to avoid right-edge amplification jitter.
+    smoothed[-1] = np.mean(arr[-w:])
+    return smoothed
 
 def detect_last_peak(data):
     """Return the most recent qualified peak as (height, peak_i, left_i, right_i).
@@ -729,22 +734,36 @@ def update():
     read_serial()
     readout_label.setText(latest_readout_text)
 
-    x = np.array(timestamps)
-    y1 = np.array(sensor1)
-    y2 = np.array(sensor2)
+    x_all = np.array(timestamps)
+    y1_all = np.array(sensor1)
+    y2_all = np.array(sensor2)
 
     global latest_average_text, last_average_update_time
     now = time.monotonic()
     if now - last_average_update_time >= AVERAGE_UPDATE_INTERVAL_SEC:
-        avg_count = min(RECENT_FADE_POINTS, len(y1))
+        avg_count = min(RECENT_FADE_POINTS, len(y1_all))
         if avg_count > 0:
-            avg_s1 = float(np.mean(y1[-avg_count:]))
-            avg_s2 = float(np.mean(y2[-avg_count:]))
+            avg_s1 = float(np.mean(y1_all[-avg_count:]))
+            avg_s2 = float(np.mean(y2_all[-avg_count:]))
             latest_average_text = f"Avg last {avg_count}: s1={avg_s1:.6f} | s2={avg_s2:.6f}"
         else:
             latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
         last_average_update_time = now
     average_label.setText(latest_average_text)
+
+    lag = max(0, int(DISPLAY_LAG_POINTS))
+    if lag > 0 and len(x_all) > lag:
+        x = x_all[:-lag]
+        y1 = y1_all[:-lag]
+        y2 = y2_all[:-lag]
+    elif lag == 0:
+        x = x_all
+        y1 = y1_all
+        y2 = y2_all
+    else:
+        x = np.array([], dtype=float)
+        y1 = np.array([], dtype=float)
+        y2 = np.array([], dtype=float)
 
     if len(x) == 0:
         return
@@ -788,7 +807,7 @@ def update():
             plot_xy.removeItem(item)
 
     # XY plot (only new data after reset)
-    xy_offset = max(0, xy_start_index - (len(sensor1) - len(y1_s)))
+    xy_offset = max(0, xy_start_index - (len(y1) - len(y1_s)))
     y1_plot = y1_s[xy_offset:]
     y2_plot = y2_s[xy_offset:]
 
