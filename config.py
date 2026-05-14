@@ -46,9 +46,9 @@ Y_CANDIDATES = [
 CRACK_LABELS = ("Crack 1", "Crack 2", "Crack 3")
 
 LABEL_COLOR_MAP = {
-    "Crack 1":    "#d62728",
-    "Crack 2":    "#2ca02c",
-    "Crack 3":    "#ff7f0e",
+    "Crack 1":    "#f3bd0a",
+    "Crack 2":    "#e55a03",
+    "Crack 3":    "#db180e",
     "Not a crack": "#7f7f7f",
 }
 

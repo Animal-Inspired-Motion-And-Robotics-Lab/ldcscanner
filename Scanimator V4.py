@@ -22,7 +22,7 @@ Edit config.py to change:
 from datetime import datetime
 from pathlib import Path
 
-from config import FRAME_STEP, SHOW_PLOTS, SAVE_GIFS, X_COL, Y_COL, TIME_COL
+from config import FRAME_STEP, SHOW_PLOTS, SAVE_GIFS, X_COL, Y_COL, TIME_COL, LABEL_COLOR_MAP
 from io_utils import (
     select_csv_files_via_gui,
     load_csv_files,
@@ -126,7 +126,11 @@ def main():
             print(f"Saved per-crack SNR CSV: {per_crack_path}")
 
         create_snr_visualizations(
-            snr_df, output_dir=run_output_dir, show_plot=SHOW_PLOTS, save_plots=True,
+            snr_df,
+            output_dir=run_output_dir,
+            show_plot=SHOW_PLOTS,
+            save_plots=True,
+            label_color_map=LABEL_COLOR_MAP,
         )
 
     # ── Step 3: animations and 3D plots ───────────────────────────────────

@@ -224,7 +224,7 @@ def _get_inductor_color_map(filenames):
 # Static SNR summary charts
 # ---------------------------------------------------------------------------
 
-def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plots=True):
+def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plots=True, label_color_map=None):
     """
     Produce static comparison charts for crack-detection SNR.
 
@@ -238,6 +238,8 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     if snr_df is None or snr_df.empty:
         print("No SNR data available for visualization.")
         return []
+
+    effective_label_color_map = label_color_map or LABEL_COLOR_MAP
 
     plot_outputs = []
     snr_col = "snr_linear" if _use_linear_snr_display() else "snr_db"
@@ -268,6 +270,7 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     unit_label = _snr_unit_label()
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
     ax_rank, ax_delta, ax_signal_noise, ax_peaks = (
         axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
     )
@@ -343,9 +346,8 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         x = np.arange(len(entity_order), dtype=float)
         width = 0.24
         crack_colors = {
-            "Crack 1": "#d62728",
-            "Crack 2": "#2ca02c",
-            "Crack 3": "#ff7f0e",
+            crack_label: effective_label_color_map.get(crack_label, "#7f7f7f")
+            for crack_label in crack_order
         }
 
         snr_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="snr_mean")
@@ -474,7 +476,7 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         lbls  = [pt[3] for pt in peak_points]
         jitter = np.linspace(-0.12, 0.12, len(x_arr)) if len(x_arr) > 1 else np.array([0.0])
 
-        crack_color_map = {**{k: v for k, v in LABEL_COLOR_MAP.items()}, "Unknown": "#7f7f7f"}
+        crack_color_map = {**{k: v for k, v in effective_label_color_map.items()}, "Unknown": "#7f7f7f"}
         for crack_label in [*CRACK_LABELS, "Unknown"]:
             mask = np.array([lbl == crack_label for lbl in lbls], dtype=bool)
             if not np.any(mask):
@@ -1552,7 +1554,7 @@ def create_3d_overlay_animation(
     ax.set_title("3D Overlay Animation")
 
     # Generate colors based on inductor type
-    inductor_color_map = _get_inductor_color_map([fname for fname, _, _, _, _ in prepared])
+    inductor_color_map = _get_inductor_color_map(list(dataframes.keys()))
     artists    = []
     max_frames = max(len(tv) for _, tv, _, _, _ in prepared)
 
