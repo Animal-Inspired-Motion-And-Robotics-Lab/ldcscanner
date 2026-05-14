@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import re
+from matplotlib import colors as mcolors
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from matplotlib.widgets import Slider, Button
@@ -17,6 +18,7 @@ from pathlib import Path
 from config import (
     LABEL_COLOR_MAP,
     CRACK_LABELS,
+    INDUCTOR_COLOR_MAP,
     X_COL,
     Y_COL,
     SNR_DISPLAY_MODE,
@@ -171,23 +173,68 @@ def _extract_sensor_group_from_filename(filename):
     return stem
 
 
+def _normalized_inductor_keys(sensor_group):
+    """Return candidate normalized keys for inductor-map lookup."""
+    key = str(sensor_group).strip().lower()
+    if not key:
+        return []
+
+    candidates = [key]
+    match = re.match(r"^([a-z]+)_(\d+)$", key)
+    if match:
+        prefix, num_text = match.groups()
+        num = int(num_text)
+        candidates.extend([
+            f"{prefix}_{num}",
+            f"{prefix}_{num:02d}",
+        ])
+
+    # Preserve order while removing duplicates.
+    unique = []
+    for c in candidates:
+        if c not in unique:
+            unique.append(c)
+    return unique
+
+
+def _resolve_inductor_base_color(sensor_group, fallback_color=(0.5, 0.5, 0.5, 1.0)):
+    """Resolve a base RGBA color for an inductor group from config."""
+    configured = {
+        str(k).strip().lower(): v
+        for k, v in (INDUCTOR_COLOR_MAP or {}).items()
+    }
+
+    for key in _normalized_inductor_keys(sensor_group):
+        if key in configured:
+            try:
+                return mcolors.to_rgba(configured[key])
+            except (ValueError, TypeError):
+                break
+    return fallback_color
+
+
+def _lighten_color(rgba_color, amount):
+    """Blend RGBA color toward white by amount in [0, 1]."""
+    r, g, b, a = rgba_color
+    amt = float(np.clip(amount, 0.0, 1.0))
+    return (
+        r + (1.0 - r) * amt,
+        g + (1.0 - g) * amt,
+        b + (1.0 - b) * amt,
+        a,
+    )
+
+
 def _get_inductor_color_map(filenames):
     """
     Create a color map for filenames grouped by inductor type.
-    
-    Each inductor type (e.g., flex_4, flex_8, flex_12) gets a base color,
-    and files of the same type get different shades of that color.
+
+    Base colors come from config.INDUCTOR_COLOR_MAP. For groups with multiple
+    files, each file gets a lighter shade of the group base color.
     
     Returns:
         Dict mapping filename → (R, G, B, A) color tuple.
     """
-    # Base colors for each inductor type (RGBA tuples)
-    type_base_colors = {
-        "flex_4": (0.2, 0.8, 0.2, 1.0),    # green
-        "flex_8": (0.2, 0.6, 1.0, 1.0),    # blue
-        "flex_12": (1.0, 0.4, 0.4, 1.0),   # red
-    }
-    
     # Group filenames by inductor type
     type_groups = {}
     for fn in filenames:
@@ -195,28 +242,21 @@ def _get_inductor_color_map(filenames):
         if sensor_group not in type_groups:
             type_groups[sensor_group] = []
         type_groups[sensor_group].append(fn)
-    
+
     # Assign colors: for each type, generate shades for each file
     color_map = {}
     for sensor_type, file_list in type_groups.items():
-        base_color = type_base_colors.get(sensor_type, (0.5, 0.5, 0.5, 1.0))
+        base_color = _resolve_inductor_base_color(sensor_type)
+        file_list = sorted(file_list, key=lambda x: str(x).lower())
         n_files = len(file_list)
-        
+
         for idx, fn in enumerate(file_list):
-            # Create a shade by interpolating between the base color and white
             if n_files > 1:
-                shade_factor = 0.5 + (idx / (n_files - 1)) * 0.5
+                lighten_amount = 0.15 + (0.55 * (idx / (n_files - 1)))
             else:
-                shade_factor = 0.75
-            
-            r, g, b, a = base_color
-            # Interpolate towards white
-            r_shade = r + (1.0 - r) * (1.0 - shade_factor)
-            g_shade = g + (1.0 - g) * (1.0 - shade_factor)
-            b_shade = b + (1.0 - b) * (1.0 - shade_factor)
-            
-            color_map[fn] = (r_shade, g_shade, b_shade, a)
-    
+                lighten_amount = 0.20
+            color_map[fn] = _lighten_color(base_color, lighten_amount)
+
     return color_map
 
 
@@ -430,9 +470,13 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         ax_delta.legend(loc="best", title="Crack size")
 
     if use_grouped_display:
+        grouped_colors = [
+            _resolve_inductor_base_color(sensor_group)
+            for sensor_group in grouped["sensor_group"].tolist()
+        ]
         scatter = ax_signal_noise.scatter(
             grouped["noise_sigma_mean"], grouped["signal_amplitude_mean"],
-            c=grouped["snr_mean"], cmap="viridis", s=80, alpha=0.9,
+            c=grouped_colors, s=80, alpha=0.9,
         )
         ax_signal_noise.set_title("Mean Signal vs Mean Noise by Sensor Group")
         ax_signal_noise.set_xlabel("Mean noise sigma")
@@ -444,6 +488,21 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
                 (row["noise_sigma_mean"], row["signal_amplitude_mean"]),
                 fontsize=7,
             )
+
+        legend_handles = [
+            plt.Line2D(
+                [0], [0],
+                marker="o",
+                color="none",
+                markerfacecolor=_resolve_inductor_base_color(group_name),
+                markeredgecolor="none",
+                markersize=7,
+                label=group_name,
+            )
+            for group_name in grouped["sensor_group"].tolist()
+        ]
+        if legend_handles:
+            ax_signal_noise.legend(handles=legend_handles, loc="best", title="Inductor")
     else:
         scatter = ax_signal_noise.scatter(
             df_runs["noise_sigma"], df_runs["signal_amplitude"],
@@ -459,7 +518,8 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
                 (row["noise_sigma"], row["signal_amplitude"]),
                 fontsize=7,
             )
-    fig.colorbar(scatter, ax=ax_signal_noise, label=f"SNR ({unit_label})")
+    if not use_grouped_display:
+        fig.colorbar(scatter, ax=ax_signal_noise, label=f"SNR ({unit_label})")
 
     df = df_runs
     peak_rank = np.arange(1, len(df) + 1)
@@ -1322,7 +1382,7 @@ def create_interactive_raw_3d_transform_preview(
         )
 
         button_ax = fig.add_axes([0.75, 0.07, 0.2, 0.06])
-        overwrite_button = Button(button_ax, "overwrite rotated data")
+        overwrite_button = Button(button_ax, "apply rotated data")
 
         fig.text(
             0.02,

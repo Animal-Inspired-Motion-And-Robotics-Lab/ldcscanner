@@ -72,3 +72,11 @@ LABEL_INPUT_MAP = {
     "crack 2": "Crack 2",
     "crack 3": "Crack 3",
 }
+
+# --- Inductor group color map ---------------------------------------------
+# Example: "flex_04": "#1f77b4" (blue), "flex_03": "#2ca02c" (green)
+INDUCTOR_COLOR_MAP = {
+    "flex_04": "#0fd4ea",
+    "flex_08": "#0958c7",
+    "flex_12": "#100386",
+}
