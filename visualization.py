@@ -1303,7 +1303,7 @@ def create_interactive_raw_3d_transform_preview(
         grid = fig.add_gridspec(1, 2, width_ratios=[1.7, 1.0])
         ax = fig.add_subplot(grid[0, 0], projection="3d")
         ax_plane = fig.add_subplot(grid[0, 1])
-        fig.subplots_adjust(bottom=0.21)
+        fig.subplots_adjust(bottom=0.25)
 
         ax.set_xlabel("Time")
         ax.set_ylabel("R_p (smoothed)")
@@ -1362,8 +1362,8 @@ def create_interactive_raw_3d_transform_preview(
 
 
 
-        # Place the angle slider above, smoothing slider below
-        slider_ax = fig.add_axes([0.14, 0.13, 0.58, 0.035])
+        # Place angle slider above, smoothing slider mid, FPS slider below.
+        slider_ax = fig.add_axes([0.14, 0.16, 0.58, 0.035])
         angle_slider = Slider(
             slider_ax,
             "Y/Z Transform (deg)",
@@ -1373,7 +1373,7 @@ def create_interactive_raw_3d_transform_preview(
             valstep=0.1,
         )
 
-        smooth_ax = fig.add_axes([0.14, 0.08, 0.58, 0.035])
+        smooth_ax = fig.add_axes([0.14, 0.11, 0.58, 0.035])
         smooth_slider = Slider(
             smooth_ax,
             "Smoothing (window)",
@@ -1383,13 +1383,29 @@ def create_interactive_raw_3d_transform_preview(
             valstep=1,
         )
 
+        fps_min, fps_max = 0, 250
+        initial_fps = int(round(1000.0 / max(float(interval), 1.0)))
+        initial_fps = min(max(initial_fps, fps_min), fps_max)
+        speed_state = {"fps": initial_fps}
+        playback_state = {"progress": 0.0}
+
+        fps_ax = fig.add_axes([0.14, 0.06, 0.58, 0.035])
+        fps_slider = Slider(
+            fps_ax,
+            "Animation Speed (FPS)",
+            fps_min,
+            fps_max,
+            valinit=speed_state["fps"],
+            valstep=1,
+        )
+
         button_ax = fig.add_axes([0.75, 0.07, 0.2, 0.06])
         overwrite_button = Button(button_ax, "apply rotated data")
 
         fig.text(
             0.02,
             0.02,
-            "Adjust angle/smoothing + close to apply/save, or click overwrite rotated data.",
+            "Adjust angle/smoothing/speed + close to apply/save, or click overwrite rotated data.",
             fontsize=9,
             color="#222222",
         )
@@ -1398,7 +1414,7 @@ def create_interactive_raw_3d_transform_preview(
             angle_state["deg"] = float(val)
             interaction_state["angle_changed"] = True
             # Update smoothed/rotated data
-            update(0)
+            update(0, advance=False)
 
         def on_smooth_change(val):
             smooth_state["window"] = int(val)
@@ -1408,7 +1424,11 @@ def create_interactive_raw_3d_transform_preview(
             y_vals = smooth(y_raw, smooth_state["window"])
             z_vals = smooth(z_raw, smooth_state["window"])
             rot_params = _get_yz_rotation_params(y_vals, z_vals)
-            update(0)
+            update(0, advance=False)
+
+        def on_fps_change(val):
+            speed_state["fps"] = int(val)
+            update(0, advance=False)
 
         def on_overwrite_click(_event):
             overwrite_state["selected"] = True
@@ -1416,6 +1436,7 @@ def create_interactive_raw_3d_transform_preview(
 
         angle_slider.on_changed(on_angle_change)
         smooth_slider.on_changed(on_smooth_change)
+        fps_slider.on_changed(on_fps_change)
         overwrite_button.on_clicked(on_overwrite_click)
 
         def init():
@@ -1427,11 +1448,17 @@ def create_interactive_raw_3d_transform_preview(
             plane_point.set_data([], [])
             return []
 
-        def update(frame):
+        def update(frame, advance=True):
             nonlocal surf, contour
 
             angle_deg = angle_state["deg"]
-            last_idx = min(frame, len(t_vals) - 1)
+            if advance:
+                frames_per_tick = (speed_state["fps"] * max(float(interval), 1.0)) / 1000.0
+                playback_state["progress"] += max(frames_per_tick, 0.01)
+                if playback_state["progress"] >= len(t_vals):
+                    playback_state["progress"] = playback_state["progress"] % len(t_vals)
+
+            last_idx = min(int(playback_state["progress"]), len(t_vals) - 1)
             if last_idx < 0:
                 return []
 
@@ -1490,16 +1517,16 @@ def create_interactive_raw_3d_transform_preview(
             ax_plane.set_ylim(np.min(z_rot) - z_pad_dyn, np.max(z_rot) + z_pad_dyn)
 
             ax.set_title(
-                f"{filename} | Smoothed non-rotated source | Angle: {angle_deg:.1f}°"
+                f"{filename} | Smoothed non-rotated source | Angle: {angle_deg:.1f}° | FPS: {speed_state['fps']}"
             )
             return []
 
         anim = FuncAnimation(
             fig,
-            update,
+            lambda frame: update(frame, advance=True),
             frames=range(0, len(t_vals), max(1, frame_step)),
             init_func=init,
-            interval=interval,
+            interval=max(1, int(interval)),
             blit=False,
             repeat=True,
         )

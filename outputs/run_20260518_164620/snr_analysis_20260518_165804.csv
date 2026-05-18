@@ -1,0 +1,2 @@
+file,x_col,y_col,n_samples,noise_floor,noise_sigma,signal_amplitude,snr_linear,snr_db,peak_count,peak_indices,peak_snr_db_values,peak_labels,peak_height_threshold
+flex08_220_a.csv,sensor1, sensor2,1625,20.28767578833344,0.002949937375729909,0.10575211431900655,35.84893536692117,31.089525252440723,6,250;474;694;981;1219;1458,36.746928;30.999040;20.740991;21.167266;31.179078;36.797020,Crack 3;Crack 2;Crack 1;Crack 1;Crack 2;Crack 3,
