@@ -13,22 +13,37 @@ pg.setConfigOptions(antialias=True)
 # -------------------------
 # SERIAL CONFIGS
 # ------------------------- 
-SERIAL_PORT = "COM6"   
+SERIAL_PORT = "COM9"   
 BAUDRATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
 
-CSV_FILE = input("Enter CSV filename (default: serial_data_log.csv): ").strip()
-if not CSV_FILE:
-    CSV_FILE = "serial_data_log.csv"
-if not CSV_FILE.lower().endswith(".csv"):
-    CSV_FILE += ".csv"
+CSV_FILE = "test.csv"
+csv_file = None
+csv_writer = None
 
-csv_file = open(CSV_FILE, "a", newline="")
-csv_writer = csv.writer(csv_file)
-if os.path.getsize(CSV_FILE) == 0:
-    csv_writer.writerow(["timestamp", "sensor1", "sensor2", "sensor1_smooth", 
-                         "sensor2_smooth", "sensor1_smooth_rot", "sensor2_smooth_rot", 
-                         "rotation_angle_deg"])
+def normalize_csv_filename(filename):
+    name = str(filename).strip()
+    if not name:
+        name = "test.csv"
+    if not name.lower().endswith(".csv"):
+        name += ".csv"
+    return name
+
+def set_csv_output_file(filename):
+    global CSV_FILE, csv_file, csv_writer
+    CSV_FILE = normalize_csv_filename(filename)
+
+    if csv_file is not None and not csv_file.closed:
+        csv_file.close()
+
+    csv_file = open(CSV_FILE, "a", newline="")
+    csv_writer = csv.writer(csv_file)
+    if os.path.getsize(CSV_FILE) == 0:
+        csv_writer.writerow(["timestamp", "sensor1", "sensor2", "sensor1_smooth",
+                             "sensor2_smooth", "sensor1_smooth_rot", "sensor2_smooth_rot",
+                             "rotation_angle_deg"])
+
+set_csv_output_file(CSV_FILE)
 
 # -------------------------
 # DATA STORAGE
@@ -594,10 +609,24 @@ write_file_label.setAlignment(QtCore.Qt.AlignHCenter)
 write_file_label.setStyleSheet("font-size: 10px; color: #bbbbbb;")
 write_file_label.setToolTip(CSV_FILE)
 
+write_file_input = QtWidgets.QLineEdit(CSV_FILE)
+write_file_input.setPlaceholderText("CSV filename")
+write_file_input.setMinimumWidth(160)
+write_file_input.setToolTip("Output CSV file name (press Enter to apply)")
+
+def apply_csv_filename():
+    set_csv_output_file(write_file_input.text())
+    write_file_input.setText(CSV_FILE)
+    write_file_label.setText(os.path.basename(CSV_FILE))
+    write_file_label.setToolTip(CSV_FILE)
+
+write_file_input.editingFinished.connect(apply_csv_filename)
+
 write_controls_layout = QtWidgets.QVBoxLayout()
 write_controls_layout.setContentsMargins(0, 0, 0, 0)
 write_controls_layout.setSpacing(2)
 write_controls_layout.addWidget(write_toggle_button)
+write_controls_layout.addWidget(write_file_input)
 write_controls_layout.addWidget(write_file_label)
 
 write_controls_container = QtWidgets.QWidget()
@@ -864,7 +893,8 @@ timer.timeout.connect(update)
 timer.start(50)
 
 def close_resources():
-    csv_file.close()
+    if csv_file is not None and not csv_file.closed:
+        csv_file.close()
 
 app.aboutToQuit.connect(close_resources)
 
