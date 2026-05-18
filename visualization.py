@@ -318,7 +318,7 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     if use_grouped_display:
         entity_df = grouped.copy()
         entity_col = "sensor_group"
-        x_label = "Inductor group rank (best to worst)"
+        x_label = "Inductor group"
     else:
         entity_df = df_runs[["file", snr_col, "noise_sigma", "signal_amplitude"]].copy()
         entity_df = entity_df.rename(
@@ -336,6 +336,10 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
 
     if entity_col != "entity":
         entity_df = entity_df.rename(columns={entity_col: "entity"})
+
+    # Sort entity_df alphabetically by entity (group name)
+    entity_df = entity_df.sort_values("entity", key=lambda x: x.str.lower()).reset_index(drop=True)
+    entity_order = entity_df["entity"].tolist()
 
     crack_records = []
     for _, row in df_runs.iterrows():
@@ -381,20 +385,18 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         per_crack_summary["snr_std"] = per_crack_summary["snr_std"].fillna(0.0)
         per_crack_summary["signal_std"] = per_crack_summary["signal_std"].fillna(0.0)
 
-        entity_order = entity_df["entity"].tolist()
-        crack_order = list(CRACK_LABELS)
-        x = np.arange(len(entity_order), dtype=float)
-        width = 0.24
-        crack_colors = {
-            crack_label: effective_label_color_map.get(crack_label, "#7f7f7f")
-            for crack_label in crack_order
-        }
-
         snr_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="snr_mean")
         snr_std_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="snr_std")
         sig_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="signal_mean")
         sig_std_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="signal_std")
 
+        crack_order = list(CRACK_LABELS)
+        width = 0.24
+        crack_colors = {
+            crack_label: effective_label_color_map.get(crack_label, "#7f7f7f")
+            for crack_label in crack_order
+        }
+        x = np.arange(len(entity_order), dtype=float)
 
         for idx, crack_label in enumerate(crack_order):
             offset = (idx - (len(crack_order) - 1) / 2.0) * width

@@ -5,6 +5,7 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+from natsort import natsorted  # Ensure natural sorting
 
 from config import CRACK_LABELS
 
@@ -501,7 +502,10 @@ def analyze_snr(
         print("No valid sensor signals found for SNR analysis.")
         return pd.DataFrame(), pd.DataFrame()
 
-    snr_df = pd.DataFrame(records).sort_values("snr_db", ascending=False).reset_index(drop=True)
+    snr_df = pd.DataFrame(records)
+    snr_df["file"] = snr_df["file"].astype(str)  # Ensure file column is string
+    snr_df = snr_df.loc[natsorted(snr_df.index, key=lambda i: snr_df.loc[i, "file"])]
+    snr_df = snr_df.reset_index(drop=True)
 
     per_crack_df = pd.DataFrame(per_crack_records)
     if not per_crack_df.empty:
