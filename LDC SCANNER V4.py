@@ -82,6 +82,8 @@ SURFACE_MAX_POINTS_MIN = SURFACE_MAX_POINTS
 SURFACE_MAX_POINTS_MAX = SURFACE_MAX_POINTS * 10
 SURFACE_DATA_MODE = "RAW"  # RAW or ROTATED for left 3D panel
 SURFACE_SMOOTH_MODE = "UNSMOOTHED"  # UNSMOOTHED or SMOOTHED input for left 3D panel
+RP_ZERO_EPSILON = 1e-12
+RP_ZERO_FALLBACK_WINDOW = 100
 
 # last detected peak height (persists until a new peak is found)
 last_peak_s2 = float('nan')
@@ -184,6 +186,17 @@ def get_rotation_params(y1_plot, y2_plot):
             rot_sy = 1.0
         return rot_cx, rot_cy, rot_sx, rot_sy
     return 0.0, 0.0, 1.0, 1.0
+
+def has_usable_rp(rp_vals, eps=RP_ZERO_EPSILON):
+    vals = np.asarray(rp_vals, dtype=float)
+    if vals.size < 2:
+        return False
+    window = min(int(RP_ZERO_FALLBACK_WINDOW), vals.size)
+    recent = vals[-window:]
+    recent = recent[np.isfinite(recent)]
+    if recent.size < 2:
+        return False
+    return float(np.ptp(recent)) > float(eps)
 
 def build_surface_data(x_vals, rp_vals, l_vals):
     if len(x_vals) < 2:
@@ -392,6 +405,7 @@ win.setFocusPolicy(QtCore.Qt.StrongFocus)
 win.setFocus()
 
 RIGHT_X_MODE = "RP"  # RP or TIME
+right_plot_auto_time_fallback = False
 
 bottom_axis = ToggleAxisItem(orientation='bottom')
 plot_xy = win.addPlot(title="Phase Space", axisItems={'bottom': bottom_axis})
@@ -405,6 +419,9 @@ def set_right_x_mode(mode):
     if RIGHT_X_MODE == "TIME":
         plot_xy.setTitle("Time Trace")
         plot_xy.setLabel('bottom', 'Time (timestamp)')
+    elif right_plot_auto_time_fallback:
+        plot_xy.setTitle("Time Trace (auto fallback)")
+        plot_xy.setLabel('bottom', 'Time (timestamp, Rp flat/zero)')
     else:
         plot_xy.setTitle("Phase Space")
         plot_xy.setLabel('bottom', 'R_p (ohm)')
@@ -781,11 +798,25 @@ def parse_serial_line(line):
             if not segment or ":" not in segment:
                 continue
             key, value = segment.split(":", 1)
-            fields[key.strip().lower()] = float(value.strip())
+            try:
+                fields[key.strip().lower()] = float(value.strip())
+            except ValueError:
+                continue
 
-        return fields["t"], fields["rp"], fields["l"]
+        t = fields.get("t")
+        l_val = fields.get("l")
+        rp_val = fields.get("rp", 0.0)
+        if t is None or l_val is None:
+            raise ValueError("Missing required keyed fields")
+        if not np.isfinite(t) or not np.isfinite(l_val):
+            raise ValueError("Non-finite required keyed fields")
+        if not np.isfinite(rp_val):
+            rp_val = 0.0
+        return float(t), float(rp_val), float(l_val)
 
     t, s1, s2 = map(float, line.split())
+    if not np.isfinite(t) or not np.isfinite(s1) or not np.isfinite(s2):
+        raise ValueError("Non-finite whitespace fields")
     return t, s1, s2
 
 def append_sensor_sample(t, s1, s2):
@@ -962,12 +993,23 @@ def update():
     y2_plot = y2_s[xy_offset:]
     x_plot = x_s[xy_offset:]
 
+    global right_plot_auto_time_fallback
     if RIGHT_X_MODE == "TIME":
+        right_plot_auto_time_fallback = False
         x_right = x_plot
         y_right = y2_plot
     else:
-        rot_cx, rot_cy, rot_sx, rot_sy = get_rotation_params(y1_plot, y2_plot)
-        x_right, y_right = rotate_xy_arrays(y1_plot, y2_plot, ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
+        if has_usable_rp(y1_plot):
+            right_plot_auto_time_fallback = False
+            rot_cx, rot_cy, rot_sx, rot_sy = get_rotation_params(y1_plot, y2_plot)
+            x_right, y_right = rotate_xy_arrays(y1_plot, y2_plot, ROTATION_ANGLE, rot_cx, rot_cy, rot_sx, rot_sy)
+        else:
+            # If Rp is flat/zero, preserve live L tracking by plotting against time.
+            right_plot_auto_time_fallback = True
+            x_right = x_plot
+            y_right = y2_plot
+
+    set_right_x_mode(RIGHT_X_MODE)
 
     xy_curve.setData(x_right, y_right)
 
