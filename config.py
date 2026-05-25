@@ -88,3 +88,16 @@ INDUCTOR_COLOR_MAP = {
     "flex08_440": "#03611A",
     "flex08_660": "#023712",
 }
+
+FREQUENCY_COLOR_MAP = {
+    "1.1": "#100386",
+    "2.4": "#0958c7",
+    "3.2": "#0fd4ea"
+}
+
+# --- Material group color map -------------------------------------------------
+MATERIAL_COLOR_MAP = {
+    "Stainless Steel": "#b412f9",  # blue
+    "Aluminum": "#801fee",  # green
+    "Titanium": "#4E0696",  # orange
+}
