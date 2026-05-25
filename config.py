@@ -25,6 +25,10 @@ TIME_COL = "timestamp"
 # Allowed values: "db" or "linear"
 SNR_DISPLAY_MODE = "linear"
 
+# Controls whether crack-detection labeling/SNR outputs are produced.
+# False skips manual crack-window labeling and crack SNR analysis output.
+CRACK_DETECTION_OUTPUT = True
+
 # Controls grouping in static SNR charts only (analysis remains per-file).
 # Allowed values: "grouped" or "per_file"
 SNR_CHART_GROUP_MODE = "grouped"
