@@ -50,6 +50,8 @@ MAX_POINTS = 5000
 timestamps = deque(maxlen=MAX_POINTS)
 sensor1 = deque(maxlen=MAX_POINTS)
 sensor2 = deque(maxlen=MAX_POINTS)
+crack_times = deque(maxlen=MAX_POINTS)
+crack_sizes = deque(maxlen=MAX_POINTS)
 
 # control flags
 paused = False
@@ -70,6 +72,7 @@ RECENT_FADE_POINTS = 100
 AVERAGE_UPDATE_INTERVAL_SEC = 5.0
 RP_ZERO_EPSILON = 1e-12
 RP_ZERO_FALLBACK_WINDOW = 100
+ui_start_monotonic = time.monotonic()
 
 def has_usable_rp(rp_vals, eps=RP_ZERO_EPSILON):
     vals = np.asarray(rp_vals, dtype=float)
@@ -299,9 +302,7 @@ reserved_row_layout.setSpacing(6)
 reserved_container = QtWidgets.QWidget()
 reserved_layout = QtWidgets.QVBoxLayout(reserved_container)
 reserved_layout.setContentsMargins(0, 0, 0, 0)
-reserved_layout.setSpacing(2)
-reserved_title = QtWidgets.QLabel("Reserved Display")
-reserved_layout.addWidget(reserved_title)
+reserved_layout.setSpacing(0)
 
 reserved_frame = QtWidgets.QFrame()
 reserved_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
@@ -311,12 +312,22 @@ reserved_frame.setStyleSheet(
 reserved_frame_layout = QtWidgets.QVBoxLayout(reserved_frame)
 reserved_frame_layout.setContentsMargins(8, 8, 8, 8)
 reserved_frame_layout.setSpacing(0)
-reserved_label = QtWidgets.QLabel("Future display area")
-reserved_label.setAlignment(QtCore.Qt.AlignCenter)
-reserved_label.setStyleSheet("color: #aaaaaa;")
-reserved_frame_layout.addWidget(reserved_label)
-reserved_frame.setFixedHeight(220)
+crack_win = pg.GraphicsLayoutWidget()
+reserved_frame_layout.addWidget(crack_win)
+reserved_frame.setFixedHeight(242)
 reserved_layout.addWidget(reserved_frame)
+
+crack_plot = crack_win.addPlot()
+crack_plot.setLabel('bottom', 'Time (timestamp)')
+crack_plot.setLabel('left', 'Crack size')
+crack_plot.showGrid(x=True, y=True, alpha=0.25)
+crack_plot.setYRange(0.0, 1.0, padding=0.0)
+crack_curve = crack_plot.plot(
+    [],
+    [],
+    pen=pg.mkPen((255, 190, 140, 230), width=1),
+    connect='pairs',
+)
 
 reserved_row_layout.addWidget(reserved_container, 1)
 
@@ -425,13 +436,16 @@ main_widget.show()
 # -------------------------
 def keyPressEvent(event):
     global paused, xy_start_index
-    global latest_average_text, last_average_update_time
+    global latest_average_text, last_average_update_time, ui_start_monotonic
     if event.key() == QtCore.Qt.Key_Space:
         # Clear all buffered data so both plots restart from a clean state.
         timestamps.clear()
         sensor1.clear()
         sensor2.clear()
+        crack_times.clear()
+        crack_sizes.clear()
         xy_start_index = 0
+        ui_start_monotonic = time.monotonic()
 
         # Reset left 3D plot.
         surface_meshdata = gl.MeshData(vertexes=_bootstrap_vertices, faces=_bootstrap_faces)
@@ -451,6 +465,7 @@ def keyPressEvent(event):
         latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
         average_label.setText(latest_average_text)
         last_average_update_time = time.monotonic()
+        crack_curve.setData([], [])
     elif event.key() == QtCore.Qt.Key_P:
         paused = not paused
         if paused:
@@ -482,21 +497,44 @@ surface_view.keyPressEvent = keyPressEvent
 # -------------------------
 # SERIAL READ
 # -------------------------
+def parse_keyed_fields(line):
+    fields = {}
+    payload = line.split("|", 1)[0]
+    for segment in payload.split(">"):
+        if not segment or ":" not in segment:
+            continue
+        key, value = segment.split(":", 1)
+        try:
+            fields[key.strip().lower()] = float(value.strip())
+        except ValueError:
+            continue
+    return fields
+
+def append_crack_sample(line):
+    if ">" not in line or ":" not in line:
+        return
+
+    fields = parse_keyed_fields(line)
+    crack_val = fields.get("crack")
+    if crack_val is None or not np.isfinite(crack_val) or float(crack_val) == 0.0:
+        return
+
+    t_val = fields.get("t")
+    if t_val is None and len(timestamps) > 0:
+        t_val = float(timestamps[-1])
+    if t_val is None or not np.isfinite(t_val):
+        return
+
+    t_event = float(t_val)
+    crack_times.append(t_event)
+    crack_sizes.append(float(crack_val))
+
 def parse_serial_line(line):
     if not line:
         raise ValueError("Empty serial line")
 
     if ">" in line and ":" in line:
-        fields = {}
-        payload = line.split("|", 1)[0]
-        for segment in payload.split(">"):
-            if not segment or ":" not in segment:
-                continue
-            key, value = segment.split(":", 1)
-            try:
-                fields[key.strip().lower()] = float(value.strip())
-            except ValueError:
-                continue
+        fields = parse_keyed_fields(line)
 
         t = fields.get("t")
         l_val = fields.get("l")
@@ -555,6 +593,8 @@ def send_serial_command():
         if not line:
             continue
 
+        append_crack_sample(line)
+
         try:
             t, s1, s2 = parse_serial_line(line)
             append_sensor_sample(t, s1, s2)
@@ -578,6 +618,7 @@ def read_serial():
         return
     while ser.in_waiting:
         line = ser.readline().decode(errors='ignore').strip()
+        append_crack_sample(line)
         try:
             t, s1, s2 = parse_serial_line(line)
             append_sensor_sample(t, s1, s2)
@@ -607,6 +648,28 @@ def update():
             latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
         last_average_update_time = now
     average_label.setText(latest_average_text)
+
+    if len(x_all) > 0:
+        t_min = float(x_all[0])
+        t_now = float(x_all[-1])
+    else:
+        t_min = 0.0
+        t_now = float(time.monotonic() - ui_start_monotonic)
+
+    crack_plot.setXRange(t_min, max(t_now, t_min + 1e-6), padding=0.0)
+    crack_count = min(len(crack_times), len(crack_sizes))
+    if crack_count > 0:
+        crack_times_arr = np.asarray(list(crack_times)[-crack_count:], dtype=float)
+        crack_sizes_arr = np.asarray(list(crack_sizes)[-crack_count:], dtype=float)
+        crack_x = np.repeat(crack_times_arr, 2)
+        crack_y = np.empty(2 * crack_count, dtype=float)
+        crack_y[0::2] = 0.0
+        crack_y[1::2] = crack_sizes_arr
+        crack_curve.setData(crack_x, crack_y)
+        crack_plot.setYRange(0.0, max(float(np.max(crack_sizes_arr)) * 1.1, 1e-6), padding=0.0)
+    else:
+        crack_curve.setData([], [])
+        crack_plot.setYRange(0.0, 1.0, padding=0.0)
 
     lag = max(0, int(DISPLAY_LAG_POINTS))
     if lag > 0 and len(x_all) > lag:
