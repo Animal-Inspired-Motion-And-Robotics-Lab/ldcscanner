@@ -16,8 +16,6 @@ from datetime import datetime
 from pathlib import Path
 
 from config import (
-    LABEL_COLOR_MAP,
-    CRACK_LABELS,
     INDUCTOR_COLOR_MAP,
     X_COL,
     Y_COL,
@@ -72,7 +70,7 @@ def get_snr_value_display(snr_df, filename):
 
 
 def get_peak_count(snr_df, filename):
-    """Return the detected crack peak count for filename, or None."""
+    """Return the detected peak count for filename, or None."""
     if snr_df is None or snr_df.empty:
         return None
     matches = snr_df[snr_df["file"] == filename]
@@ -108,7 +106,7 @@ def get_peak_annotations(snr_df, filename):
 
     return [
         (idx, snr_vals[i] if i < len(snr_vals) else np.nan,
-              labels[i]   if i < len(labels)   else "Crack")
+              labels[i]   if i < len(labels)   else "Peak")
         for i, idx in enumerate(indices)
     ]
 
@@ -266,7 +264,7 @@ def _get_inductor_color_map(filenames):
 
 def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plots=True, label_color_map=None):
     """
-    Produce static comparison charts for crack-detection SNR.
+    Produce static comparison charts for SNR.
 
     Outputs (when save_plots=True):
       - Overview PNG: ranking, delta-to-best, signal vs noise scatter,
@@ -278,8 +276,6 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     if snr_df is None or snr_df.empty:
         print("No SNR data available for visualization.")
         return []
-
-    effective_label_color_map = label_color_map or LABEL_COLOR_MAP
 
     plot_outputs = []
     snr_col = "snr_linear" if _use_linear_snr_display() else "snr_db"
@@ -341,40 +337,36 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
     entity_df = entity_df.sort_values("entity", key=lambda x: x.str.lower()).reset_index(drop=True)
     entity_order = entity_df["entity"].tolist()
 
-    crack_records = []
+    peak_records = []
     for _, row in df_runs.iterrows():
         file_name = row.get("file")
         sensor_group = _extract_sensor_group_from_filename(file_name)
         noise_sigma = float(row.get("noise_sigma", np.nan))
         snr_vals = parse_peak_snr_series(row.get("peak_snr_db_values", ""))
-        lbl_vals = parse_peak_label_series(row.get("peak_labels", ""))
-        for i, snr_val in enumerate(snr_vals):
-            crack_label = lbl_vals[i] if i < len(lbl_vals) else "Unknown"
-            if crack_label not in CRACK_LABELS:
-                continue
+        for snr_val in snr_vals:
             if _use_linear_snr_display():
                 snr_linear_val = float(snr_val)
             else:
                 snr_linear_val = float(10 ** (float(snr_val) / 20.0))
             signal_amp = snr_linear_val * noise_sigma if np.isfinite(noise_sigma) else np.nan
-            crack_records.append(
+            peak_records.append(
                 {
                     "entity": sensor_group if use_grouped_display else file_name,
-                    "crack_label": crack_label,
+                    "peak_label": "Peak",
                     "peak_snr": float(snr_val),
                     "peak_signal_amplitude": float(signal_amp),
                 }
             )
 
-    per_crack_df = pd.DataFrame(crack_records)
-    if per_crack_df.empty:
-        ax_rank.text(0.5, 0.5, "No per-crack SNR data", ha="center", va="center")
+    per_peak_df = pd.DataFrame(peak_records)
+    if per_peak_df.empty:
+        ax_rank.text(0.5, 0.5, "No per-peak SNR data", ha="center", va="center")
         ax_rank.set_axis_off()
-        ax_delta.text(0.5, 0.5, "No per-crack signal data", ha="center", va="center")
+        ax_delta.text(0.5, 0.5, "No per-peak signal data", ha="center", va="center")
         ax_delta.set_axis_off()
     else:
-        per_crack_summary = (
-            per_crack_df.groupby(["entity", "crack_label"], as_index=False)
+        per_peak_summary = (
+            per_peak_df.groupby(["entity", "peak_label"], as_index=False)
             .agg(
                 snr_mean=("peak_snr", "mean"),
                 snr_std=("peak_snr", "std"),
@@ -382,28 +374,24 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
                 signal_std=("peak_signal_amplitude", "std"),
             )
         )
-        per_crack_summary["snr_std"] = per_crack_summary["snr_std"].fillna(0.0)
-        per_crack_summary["signal_std"] = per_crack_summary["signal_std"].fillna(0.0)
+        per_peak_summary["snr_std"] = per_peak_summary["snr_std"].fillna(0.0)
+        per_peak_summary["signal_std"] = per_peak_summary["signal_std"].fillna(0.0)
 
-        snr_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="snr_mean")
-        snr_std_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="snr_std")
-        sig_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="signal_mean")
-        sig_std_pivot = per_crack_summary.pivot(index="entity", columns="crack_label", values="signal_std")
+        snr_pivot = per_peak_summary.pivot(index="entity", columns="peak_label", values="snr_mean")
+        snr_std_pivot = per_peak_summary.pivot(index="entity", columns="peak_label", values="snr_std")
+        sig_pivot = per_peak_summary.pivot(index="entity", columns="peak_label", values="signal_mean")
+        sig_std_pivot = per_peak_summary.pivot(index="entity", columns="peak_label", values="signal_std")
 
-        crack_order = list(CRACK_LABELS)
-        width = 0.24
-        crack_colors = {
-            crack_label: effective_label_color_map.get(crack_label, "#7f7f7f")
-            for crack_label in crack_order
-        }
+        peak_order = ["Peak"]
+        width = 0.48
         x = np.arange(len(entity_order), dtype=float)
 
-        for idx, crack_label in enumerate(crack_order):
-            offset = (idx - (len(crack_order) - 1) / 2.0) * width
-            snr_vals = snr_pivot.reindex(entity_order).get(crack_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
-            snr_errs = snr_std_pivot.reindex(entity_order).get(crack_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
-            sig_vals = sig_pivot.reindex(entity_order).get(crack_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
-            sig_errs = sig_std_pivot.reindex(entity_order).get(crack_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+        for idx, peak_label in enumerate(peak_order):
+            offset = (idx - (len(peak_order) - 1) / 2.0) * width
+            snr_vals = snr_pivot.reindex(entity_order).get(peak_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+            snr_errs = snr_std_pivot.reindex(entity_order).get(peak_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+            sig_vals = sig_pivot.reindex(entity_order).get(peak_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+            sig_errs = sig_std_pivot.reindex(entity_order).get(peak_label, pd.Series(index=entity_order, dtype=float)).fillna(0.0).to_numpy(dtype=float)
 
             ax_rank.bar(
                 x + offset,
@@ -411,9 +399,9 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
                 width=width,
                 yerr=snr_errs,
                 capsize=2,
-                color=crack_colors.get(crack_label, "#7f7f7f"),
+                color="#4c78a8",
                 alpha=0.85,
-                label=crack_label,
+                label=peak_label,
             )
             ax_delta.bar(
                 x + offset,
@@ -421,27 +409,24 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
                 width=width,
                 yerr=sig_errs,
                 capsize=2,
-                color=crack_colors.get(crack_label, "#7f7f7f"),
+                color="#f58518",
                 alpha=0.85,
-                label=crack_label,
+                label=peak_label,
             )
 
-        # Overlay individual crack amplitudes as semi-transparent small grey dots (upper-right panel)
+        # Overlay individual peak amplitudes as semi-transparent small grey dots (upper-right panel)
         # Only if in grouped display mode
         if use_grouped_display:
             # Map entity to x position
             entity_x_map = {entity: i for i, entity in enumerate(entity_order)}
             # For reproducibility, use a fixed random seed
             rng = np.random.default_rng(42)
-            for idx, row in per_crack_df.iterrows():
+            for idx, row in per_peak_df.iterrows():
                 entity = row["entity"]
-                crack_label = row["crack_label"]
                 amp = row["peak_signal_amplitude"]
                 if entity in entity_x_map:
                     x_pos = entity_x_map[entity]
-                    # Offset by crack index for visual separation
-                    crack_idx = crack_order.index(crack_label) if crack_label in crack_order else 0
-                    offset = (crack_idx - (len(crack_order) - 1) / 2.0) * width
+                    offset = 0.0
                     # Add small random jitter to x position
                     jitter = rng.uniform(-0.09, 0.09)
                     ax_delta.scatter(
@@ -457,19 +442,19 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
 
         ax_rank.set_xticks(x)
         ax_rank.set_xticklabels(entity_order, rotation=20, ha="right")
-        ax_rank.set_title("Per-Crack SNR by Inductor")
+        ax_rank.set_title("Per-Peak SNR by Inductor")
         ax_rank.set_xlabel(x_label)
         ax_rank.set_ylabel(f"SNR ({unit_label})")
         ax_rank.grid(axis="y", alpha=0.25)
-        ax_rank.legend(loc="best", title="Crack size")
+        ax_rank.legend(loc="best", title="Signal")
 
         ax_delta.set_xticks(x)
         ax_delta.set_xticklabels(entity_order, rotation=20, ha="right")
-        ax_delta.set_title("Per-Crack Signal Amplitude by Inductor")
+        ax_delta.set_title("Per-Peak Signal Amplitude by Inductor")
         ax_delta.set_xlabel(x_label)
         ax_delta.set_ylabel("Amplitude")
         ax_delta.grid(axis="y", alpha=0.25)
-        ax_delta.legend(loc="best", title="Crack size")
+        ax_delta.legend(loc="best", title="Signal")
 
     if use_grouped_display:
         grouped_colors = [
@@ -538,14 +523,14 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         lbls  = [pt[3] for pt in peak_points]
         jitter = np.linspace(-0.12, 0.12, len(x_arr)) if len(x_arr) > 1 else np.array([0.0])
 
-        crack_color_map = {**{k: v for k, v in effective_label_color_map.items()}, "Unknown": "#7f7f7f"}
-        for crack_label in [*CRACK_LABELS, "Unknown"]:
-            mask = np.array([lbl == crack_label for lbl in lbls], dtype=bool)
+        peak_color_map = {"Peak": "#4c78a8", "Unknown": "#7f7f7f"}
+        for peak_label in ["Peak", "Unknown"]:
+            mask = np.array([lbl == peak_label for lbl in lbls], dtype=bool)
             if not np.any(mask):
                 continue
             ax_peaks.scatter(x_arr[mask] + jitter[mask], y_arr[mask],
-                             color=crack_color_map[crack_label], alpha=0.75, s=28,
-                             label=crack_label)
+                             color=peak_color_map[peak_label], alpha=0.75, s=28,
+                             label=peak_label)
 
         for i, file_name in enumerate(df["file"], start=1):
             run_vals = [pt[1] for pt in peak_points if pt[2] == file_name]
@@ -561,7 +546,7 @@ def create_snr_visualizations(snr_df, output_dir=".", show_plot=False, save_plot
         if _use_linear_snr_display():
             ax_peaks.axhline(1.0, color="#d62728", linestyle="--", linewidth=1.5, alpha=0.9)
         ax_peaks.grid(alpha=0.25)
-        ax_peaks.legend(loc="best", title="Crack label")
+        ax_peaks.legend(loc="best", title="Signal")
     else:
         ax_peaks.text(0.5, 0.5, "No finite peak SNR values available", ha="center", va="center")
         ax_peaks.set_axis_off()
@@ -766,7 +751,7 @@ def create_overlay_animation(
     Animate overlaid, normalized XY traces from all loaded files.
 
     Each file is drawn in a distinct color with a fading tail.
-    Noise-floor bands and detected crack peaks are annotated per trace.
+    Noise-floor bands and detected peaks are annotated per trace.
     """
     if not dataframes:
         print("No dataframes available for animation.")
@@ -841,7 +826,7 @@ def create_overlay_animation(
         snr_value      = get_snr_value_display(snr_df, filename)
         peak_count     = get_peak_count(snr_df, filename)
         peak_annotations = get_peak_annotations(snr_df, filename)
-        label = (f"{filename} | Crack SNR: {fmt_snr_display(snr_value)} | "
+        label = (f"{filename} | SNR: {fmt_snr_display(snr_value)} | "
                  f"Peaks: {peak_count if peak_count is not None else 'n/a'}")
 
         tail_segments = LineCollection([], linewidths=2.0, zorder=2)
@@ -1585,7 +1570,7 @@ def create_3d_overlay_animation(
       Z-axis = Inductance (sensor2_smooth_rot, normalised per-file to [0, 1])
 
     A faint ghost trace is drawn first for context, then a fading-tail
-    point sweeps along each file's path.  Detected crack peaks appear as
+    point sweeps along each file's path. Detected peaks appear as
     triangle markers when the animation reaches their position.
 
     Note: 3-D animations cannot use matplotlib blitting, so they render

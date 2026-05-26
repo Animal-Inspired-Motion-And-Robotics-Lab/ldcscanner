@@ -7,8 +7,6 @@ import pandas as pd
 from scipy.signal import find_peaks
 from natsort import natsorted  # Ensure natural sorting
 
-from config import CRACK_LABELS
-
 
 # ---------------------------------------------------------------------------
 # Column name helpers
@@ -140,24 +138,16 @@ def detect_raw_peak_candidates(y_vals, max_peaks=10, min_peak_distance=60):
 # SNR computation
 # ---------------------------------------------------------------------------
 
-def compute_xy_crack_snr_metrics(
+def compute_xy_snr_metrics(
     x_vals,
     y_vals,
     baseline_window=101,
     max_peaks=9,
     min_peak_distance=100,
     sigma_threshold_multiplier=3.0,
-    manual_windows=None,
-    row_indices=None,
-    allow_automatic_fallback=False,
 ):
     """
-    Compute crack-focused SNR metrics for a single sensor trace.
-
-    In strict ground-truth mode (default), peaks are drawn only from
-    manual_windows — one peak per window (the strongest baseline-removed
-    point inside).  Set allow_automatic_fallback=True to use scipy
-    find_peaks instead when no manual windows are provided.
+    Compute peak-based SNR metrics for a single sensor trace.
 
     Returns:
         Dict of metrics, or None if computation is not possible.
@@ -167,184 +157,43 @@ def compute_xy_crack_snr_metrics(
 
     y_vals = np.asarray(y_vals, dtype=float)
 
-    peak_labels        = []
-    per_window_records = []
-    peak_height_threshold = np.nan
+    peak_height_threshold = float(np.median(y_vals) + (sigma_threshold_multiplier * np.std(y_vals)))
+    peak_indices, peak_props = find_peaks(
+        y_vals,
+        height=peak_height_threshold,
+        distance=max(1, min_peak_distance),
+    )
+    peak_heights = peak_props.get("peak_heights", np.array([]))
 
-    if manual_windows:
-        windows_info = []
-        crack_mask = np.zeros(len(y_vals), dtype=bool)
-        row_indices_arr = np.asarray(row_indices, dtype=int) if row_indices is not None else None
+    if len(peak_indices) > max_peaks:
+        keep = np.argsort(peak_heights)[::-1][:max_peaks]
+        peak_indices = peak_indices[keep]
+        peak_heights = peak_heights[keep]
 
-        for window in manual_windows:
-            label = str(window["label"])
-            in_window_idx = np.array([], dtype=int)
+    if len(peak_indices) > 0:
+        sort_idx = np.argsort(peak_indices)
+        peak_indices = peak_indices[sort_idx]
+        peak_heights = peak_heights[sort_idx]
 
-            start_row = window.get("start_row")
-            end_row   = window.get("end_row")
-            if (
-                start_row is not None
-                and end_row is not None
-                and row_indices_arr is not None
-                and len(row_indices_arr) == len(y_vals)
-                and np.isfinite(start_row)
-                and np.isfinite(end_row)
-            ):
-                lo, hi = sorted((int(start_row), int(end_row)))
-                in_window_idx = np.flatnonzero((row_indices_arr >= lo) & (row_indices_arr <= hi))
-            elif "start_x" in window and "end_x" in window:
-                start_x, end_x = float(window["start_x"]), float(window["end_x"])
-                if np.isfinite(start_x) and np.isfinite(end_x):
-                    lo, hi = sorted((start_x, end_x))
-                    in_window_idx = np.flatnonzero((x_vals >= lo) & (x_vals <= hi))
-
-            if len(in_window_idx) == 0:
-                continue
-
-            start_idx = int(in_window_idx[0])
-            end_idx = int(in_window_idx[-1])
-            crack_mask[start_idx:end_idx + 1] = True
-            windows_info.append({
-                "label": label,
-                "indices": in_window_idx,
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-            })
-
-        if not windows_info:
-            return None
-
-        windows_info.sort(key=lambda w: (w["start_idx"], w["end_idx"]))
-
-        non_crack_vals = y_vals[~crack_mask]
-        if len(non_crack_vals) < 2:
-            return None
-
-        sigma_baseline = float(np.std(non_crack_vals, ddof=0))
-        if sigma_baseline <= 0:
-            return None
-
-        selected_peak_indices = []
-        selected_peak_values = []
-        peak_signals = []
-
-        for i, info in enumerate(windows_info):
-            label = info["label"]
-            in_window_idx = info["indices"]
-
-            peak_idx = int(in_window_idx[int(np.argmax(y_vals[in_window_idx]))])
-            a_peak = float(y_vals[peak_idx])
-
-            left_start = 0 if i == 0 else int(windows_info[i - 1]["end_idx"]) + 1
-            left_end = int(info["start_idx"]) - 1
-            right_start = int(info["end_idx"]) + 1
-            right_end = (len(y_vals) - 1) if i == (len(windows_info) - 1) else int(windows_info[i + 1]["start_idx"]) - 1
-
-            left_vals = y_vals[left_start:left_end + 1] if left_end >= left_start else np.array([], dtype=float)
-            right_vals = y_vals[right_start:right_end + 1] if right_end >= right_start else np.array([], dtype=float)
-
-            if len(left_vals) == 0 and len(right_vals) == 0:
-                continue
-
-            baseline_neighbors = np.concatenate([left_vals, right_vals])
-            mu_baseline = float(np.mean(baseline_neighbors))
-
-            peak_signal = float(a_peak - mu_baseline)
-            peak_snr_linear = peak_signal / sigma_baseline
-            peak_snr_db = float(20 * np.log10(peak_snr_linear)) if peak_snr_linear > 0 else float("-inf")
-
-            start_row_record = end_row_record = peak_row_record = np.nan
-            if row_indices_arr is not None and len(row_indices_arr) == len(y_vals):
-                start_row_record = int(row_indices_arr[int(in_window_idx[0])])
-                end_row_record = int(row_indices_arr[int(in_window_idx[-1])])
-                peak_row_record = int(row_indices_arr[peak_idx])
-
-            selected_peak_indices.append(peak_idx)
-            selected_peak_values.append(a_peak)
-            peak_signals.append(peak_signal)
-            peak_labels.append(label)
-            per_window_records.append({
-                "manual_label":               label,
-                "window_start_x":             float(x_vals[in_window_idx[0]]),
-                "window_end_x":               float(x_vals[in_window_idx[-1]]),
-                "window_start_raw_idx":       start_row_record,
-                "window_end_raw_idx":         end_row_record,
-                "peak_index_in_clean_series": int(peak_idx),
-                "peak_raw_idx":               peak_row_record,
-                "peak_x":                     float(x_vals[peak_idx]),
-                "peak_y":                     float(y_vals[peak_idx]),
-                "noise_floor":                mu_baseline,
-                "noise_sigma":                float(sigma_baseline),
-                "peak_signal_amplitude":      peak_signal,
-                "peak_snr_linear":            float(peak_snr_linear),
-                "peak_snr_db":                peak_snr_db,
-            })
-
-        peak_indices = np.array(selected_peak_indices, dtype=int)
-        peak_values = np.array(selected_peak_values, dtype=float)
-        peak_signals_arr = np.array(peak_signals, dtype=float)
-        noise_floor = float(np.mean(non_crack_vals))
-        noise_sigma = float(sigma_baseline)
-
-    elif allow_automatic_fallback:
-        peak_indices, peak_props = find_peaks(
-            y_vals,
-            height=np.median(y_vals) + (sigma_threshold_multiplier * np.std(y_vals)),
-            distance=max(1, min_peak_distance),
-        )
-        peak_heights = peak_props.get("peak_heights", np.array([]))
-
-        if len(peak_indices) > max_peaks:
-            keep = np.argsort(peak_heights)[::-1][:max_peaks]
-            peak_indices = peak_indices[keep]
-            peak_heights = peak_heights[keep]
-
-        if len(peak_indices) > 0:
-            sort_idx = np.argsort(peak_indices)
-            peak_indices = peak_indices[sort_idx]
-            peak_heights = peak_heights[sort_idx]
-    else:
+    if len(peak_heights) == 0:
         return None
 
-    if manual_windows:
-        if len(peak_indices) == 0:
-            return None
-
-        signal_amplitude = float(np.median(peak_signals_arr))
-        snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
-        snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
-
-        peak_snr_db_values = []
-        for s in peak_signals_arr:
-            if noise_sigma > 0:
-                s_lin = float(s / noise_sigma)
-                peak_snr_db_values.append(float(20 * np.log10(s_lin)) if s_lin > 0 else float("-inf"))
-            else:
-                peak_snr_db_values.append(float("-inf"))
-
-    else:
-        if len(peak_heights) == 0:
-            return None
-
-        noise_floor = float(np.median(y_vals))
-        noise_sigma = float(np.std(y_vals))
-        if noise_sigma <= 0:
-            return None
-
-        signal_amplitude = float(np.median(peak_heights - noise_floor))
-        snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
-        snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
-
-        peak_snr_db_values = []
-        for height in peak_heights:
-            s = float(height - noise_floor)
-            if noise_sigma > 0 and s > 0:
-                peak_snr_db_values.append(float(20 * np.log10(s / noise_sigma)))
-            else:
-                peak_snr_db_values.append(float("-inf"))
-
-    if manual_windows and len(peak_signals_arr) == 0:
+    noise_floor = float(np.median(y_vals))
+    noise_sigma = float(np.std(y_vals))
+    if noise_sigma <= 0:
         return None
+
+    signal_amplitude = float(np.median(peak_heights - noise_floor))
+    snr_linear = signal_amplitude / noise_sigma if noise_sigma > 0 else 0.0
+    snr_db = 20 * np.log10(snr_linear) if snr_linear > 0 else -np.inf
+
+    peak_snr_db_values = []
+    for height in peak_heights:
+        s = float(height - noise_floor)
+        if noise_sigma > 0 and s > 0:
+            peak_snr_db_values.append(float(20 * np.log10(s / noise_sigma)))
+        else:
+            peak_snr_db_values.append(float("-inf"))
 
     return {
         "noise_sigma":          float(noise_sigma),
@@ -355,9 +204,9 @@ def compute_xy_crack_snr_metrics(
         "peak_count":           int(len(peak_indices)),
         "peak_indices":         ";".join(str(int(i)) for i in peak_indices),
         "peak_snr_db_values":   ";".join(f"{v:.6f}" for v in peak_snr_db_values),
-        "peak_labels":          ";".join(peak_labels),
+        "peak_labels":          ";".join("Peak" for _ in peak_indices),
         "peak_height_threshold": float(peak_height_threshold),
-        "per_window_records":   per_window_records,
+        "per_window_records":   [],
     }
 
 
@@ -365,9 +214,6 @@ def analyze_snr(
     dataframes,
     x_col="sensor1_smooth_rot",
     y_col=" sensor2_smooth_rot",
-    manual_labels_df=None,
-    require_manual_windows=False,
-    ground_truth_only=True,
     baseline_window=101,
     max_peaks=9,
     min_peak_distance=100,
@@ -375,25 +221,17 @@ def analyze_snr(
     verbose=True,
 ):
     """
-    Quantify crack-detection SNR for every file in dataframes.
-
-    If manual_labels_df is provided, labeled crack windows drive peak
-    selection.  In ground_truth_only mode, automatic peak-finding is
-    disabled entirely.
+    Quantify SNR for every file in dataframes.
 
     Returns:
-        (snr_df, per_crack_df) — file-level and per-crack DataFrames.
+        (snr_df, per_peak_df) — file-level and per-peak DataFrames.
     """
     if not dataframes:
         print("No dataframes available for SNR analysis.")
         return pd.DataFrame(), pd.DataFrame()
 
-    if ground_truth_only and (manual_labels_df is None or manual_labels_df.empty):
-        print("Ground-truth mode requires manual crack window labels.")
-        return pd.DataFrame(), pd.DataFrame()
-
-    records           = []
-    per_crack_records = []
+    records = []
+    per_peak_records = []
 
     for filename, df in dataframes.items():
         if df.empty:
@@ -412,50 +250,13 @@ def analyze_snr(
         valid = x.notna() & y.notna()
         x_vals           = x[valid].to_numpy()
         y_vals           = y[valid].to_numpy()
-        proc_row_indices = np.flatnonzero(valid.to_numpy())
 
-        file_manual_windows = []
-        if manual_labels_df is not None and not manual_labels_df.empty:
-            file_df = manual_labels_df[
-                (manual_labels_df["file"] == filename)
-                & (manual_labels_df["manual_label"].isin(CRACK_LABELS))
-            ].copy()
-
-            sort_cols = [c for c in ["window_order", "manual_label"] if c in file_df.columns]
-            if sort_cols:
-                file_df = file_df.sort_values(sort_cols)
-
-            for _, win_row in file_df.iterrows():
-                start_x   = win_row.get("window_start_x")
-                end_x     = win_row.get("window_end_x")
-                start_row = win_row.get("window_start_raw_idx")
-                end_row   = win_row.get("window_end_raw_idx")
-                label     = str(win_row.get("manual_label", ""))
-
-                if pd.isna(start_row) or pd.isna(end_row):
-                    if pd.isna(start_x) or pd.isna(end_x):
-                        continue
-                    file_manual_windows.append(
-                        {"start_x": float(start_x), "end_x": float(end_x), "label": label}
-                    )
-                else:
-                    file_manual_windows.append(
-                        {"start_row": float(start_row), "end_row": float(end_row), "label": label}
-                    )
-
-            if require_manual_windows and not file_manual_windows:
-                print(f"Skipping {filename} for SNR: no crack-labeled windows found.")
-                continue
-
-        metrics = compute_xy_crack_snr_metrics(
+        metrics = compute_xy_snr_metrics(
             x_vals, y_vals,
             baseline_window=baseline_window,
             max_peaks=max_peaks,
             min_peak_distance=min_peak_distance,
             sigma_threshold_multiplier=sigma_threshold_multiplier,
-            manual_windows=file_manual_windows or None,
-            row_indices=proc_row_indices,
-            allow_automatic_fallback=not ground_truth_only,
         )
         if metrics is None:
             continue
@@ -478,7 +279,7 @@ def analyze_snr(
         })
 
         for wr in metrics.get("per_window_records", []):
-            per_crack_records.append({
+            per_peak_records.append({
                 "file":                        filename,
                 "x_col":                       real_x,
                 "y_col":                       real_y,
@@ -507,23 +308,23 @@ def analyze_snr(
     snr_df = snr_df.loc[natsorted(snr_df.index, key=lambda i: snr_df.loc[i, "file"])]
     snr_df = snr_df.reset_index(drop=True)
 
-    per_crack_df = pd.DataFrame(per_crack_records)
-    if not per_crack_df.empty:
+    per_peak_df = pd.DataFrame(per_peak_records)
+    if not per_peak_df.empty:
         sort_cols = [c for c in ["file", "manual_label", "window_start_raw_idx"]
-                     if c in per_crack_df.columns]
+                     if c in per_peak_df.columns]
         if sort_cols:
-            per_crack_df = per_crack_df.sort_values(sort_cols).reset_index(drop=True)
+            per_peak_df = per_peak_df.sort_values(sort_cols).reset_index(drop=True)
 
     if verbose:
-        print("\nCrack-detection SNR by file (highest first):")
+        print("\nSNR by file (highest first):")
         print(snr_df[["file", "snr_db", "snr_linear", "signal_amplitude",
                        "noise_sigma", "peak_count"]].head(50))
-        if not per_crack_df.empty:
-            print("\nPer-crack window SNR details:")
-            print(per_crack_df[["file", "manual_label", "peak_snr_db",
+        if not per_peak_df.empty:
+            print("\nPer-peak SNR details:")
+            print(per_peak_df[["file", "manual_label", "peak_snr_db",
                                  "peak_signal_amplitude", "noise_sigma"]].head(50))
 
-    return snr_df, per_crack_df
+    return snr_df, per_peak_df
 
 
 def tune_snr_parameters_for_peak_targets(
@@ -557,7 +358,6 @@ def tune_snr_parameters_for_peak_targets(
     for params in candidate_settings:
         snr_df, _ = analyze_snr(
             dataframes, x_col=x_col, y_col=y_col,
-            ground_truth_only=False,
             baseline_window=params["baseline_window"],
             max_peaks=max_peaks,
             min_peak_distance=params["min_peak_distance"],

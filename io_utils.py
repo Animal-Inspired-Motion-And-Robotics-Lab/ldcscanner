@@ -8,8 +8,6 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
-from config import CRACK_LABELS
-
 
 # ---------------------------------------------------------------------------
 # Output directories
@@ -96,7 +94,7 @@ def load_csv_files(file_paths):
 
 
 # ---------------------------------------------------------------------------
-# Label cache — persist manual crack windows across runs
+# Label cache — persist manual windows across runs
 # ---------------------------------------------------------------------------
 
 def get_file_fingerprint(file_path):
@@ -125,7 +123,7 @@ def get_label_cache_path(cache_dir, source_path):
 
 def load_cached_windows(cache_path, fingerprint):
     """
-    Load cached crack windows if the fingerprint matches the source file.
+    Load cached windows if the fingerprint matches the source file.
 
     Returns a list of window dicts, an empty list if the cache exists but is
     empty, or None if the cache is missing or stale.
@@ -167,15 +165,13 @@ def load_cached_windows(cache_path, fingerprint):
         label   = str(row.get("manual_label", "")).strip()
         if pd.isna(start_x) or pd.isna(end_x):
             continue
-        if label not in CRACK_LABELS:
-            continue
         windows.append({"start_x": float(start_x), "end_x": float(end_x),
                          "label": label, "patch": None, "text": None})
     return windows
 
 
 def save_cached_windows(cache_path, fingerprint, windows):
-    """Persist manual crack windows to CSV for reuse in future runs."""
+    """Persist manual windows to CSV for reuse in future runs."""
     if fingerprint is None:
         return
 

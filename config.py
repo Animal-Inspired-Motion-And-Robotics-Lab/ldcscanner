@@ -25,10 +25,6 @@ TIME_COL = "timestamp"
 # Allowed values: "db" or "linear"
 SNR_DISPLAY_MODE = "linear"
 
-# Controls whether crack-detection labeling/SNR outputs are produced.
-# False skips manual crack-window labeling and crack SNR analysis output.
-CRACK_DETECTION_OUTPUT = True
-
 # Controls grouping in static SNR charts only (analysis remains per-file).
 # Allowed values: "grouped" or "per_file"
 SNR_CHART_GROUP_MODE = "grouped"
@@ -44,38 +40,6 @@ Y_CANDIDATES = [
     "sensor1_smooth_rot", " sensor1_smooth_rot",
     "sensor1",            " sensor1",
 ]
-
-# --- Crack label definitions -----------------------------------------------
-
-CRACK_LABELS = ("Crack 1", "Crack 2", "Crack 3")
-
-LABEL_COLOR_MAP = {
-    "Crack 1":    "#f3bd0a",
-    "Crack 2":    "#e55a03",
-    "Crack 3":    "#db180e",
-    "Not a crack": "#7f7f7f",
-}
-
-LABEL_SHORT_MAP = {
-    "Crack 1":    "C1",
-    "Crack 2":    "C2",
-    "Crack 3":    "C3",
-    "Not a crack": "N",
-}
-
-# Maps keyboard / text input to canonical label strings.
-LABEL_INPUT_MAP = {
-    "1": "Crack 1",
-    "2": "Crack 2",
-    "3": "Crack 3",
-    "0": "Not a crack",
-    "n": "Not a crack",
-    "not": "Not a crack",
-    "not a crack": "Not a crack",
-    "crack 1": "Crack 1",
-    "crack 2": "Crack 2",
-    "crack 3": "Crack 3",
-}
 
 # --- Inductor group color map ---------------------------------------------
 # Example: "flex_04": "#1f77b4" (blue), "flex_03": "#2ca02c" (green)
