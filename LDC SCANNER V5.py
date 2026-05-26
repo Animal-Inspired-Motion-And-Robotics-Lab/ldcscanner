@@ -61,6 +61,8 @@ write_to_file_enabled = False
 latest_readout_text = "Incoming: waiting for data..."
 latest_average_text = "Average: waiting for data..."
 latest_command_response_text = "Response: waiting for command..."
+latest_nonzero_mag_value = None
+latest_nonzero_width_value = None
 last_average_update_time = 0.0
 
 # XY plot tracking
@@ -72,6 +74,8 @@ RECENT_FADE_POINTS = 100
 AVERAGE_UPDATE_INTERVAL_SEC = 5.0
 RP_ZERO_EPSILON = 1e-12
 RP_ZERO_FALLBACK_WINDOW = 100
+SERIAL_RESPONSE_MAX_LINES = 20
+SERIAL_RESPONSE_BOX_MAX_HEIGHT = 180
 ui_start_monotonic = time.monotonic()
 
 def has_usable_rp(rp_vals, eps=RP_ZERO_EPSILON):
@@ -294,32 +298,26 @@ recent_segment_curves = []
 for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
     recent_segment_curves.append(plot_xy.plot(pen=pg.mkPen((255, 0, 0), width=3)))
 
-# Lower-right reserved area for a future plot (kept short by design).
-reserved_row_layout = QtWidgets.QHBoxLayout()
-reserved_row_layout.setContentsMargins(0, 0, 0, 0)
-reserved_row_layout.setSpacing(6)
+# Lower row: controls (left) and crack-event plot (right).
+lower_row_layout = QtWidgets.QHBoxLayout()
+lower_row_layout.setContentsMargins(0, 0, 0, 0)
+lower_row_layout.setSpacing(6)
 
-reserved_container = QtWidgets.QWidget()
-reserved_layout = QtWidgets.QVBoxLayout(reserved_container)
-reserved_layout.setContentsMargins(0, 0, 0, 0)
-reserved_layout.setSpacing(0)
-
-reserved_frame = QtWidgets.QFrame()
-reserved_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-reserved_frame.setStyleSheet(
+crack_frame = QtWidgets.QFrame()
+crack_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+crack_frame.setStyleSheet(
     "QFrame { border: 1px dashed #666; border-radius: 4px; background: #141414; }"
 )
-reserved_frame_layout = QtWidgets.QVBoxLayout(reserved_frame)
-reserved_frame_layout.setContentsMargins(8, 8, 8, 8)
-reserved_frame_layout.setSpacing(0)
+crack_frame_layout = QtWidgets.QVBoxLayout(crack_frame)
+crack_frame_layout.setContentsMargins(8, 8, 8, 8)
+crack_frame_layout.setSpacing(0)
 crack_win = pg.GraphicsLayoutWidget()
-reserved_frame_layout.addWidget(crack_win)
-reserved_frame.setFixedHeight(242)
-reserved_layout.addWidget(reserved_frame)
+crack_frame_layout.addWidget(crack_win)
+crack_frame.setFixedHeight(242)
 
 crack_plot = crack_win.addPlot()
 crack_plot.setLabel('bottom', 'Time (timestamp)')
-crack_plot.setLabel('left', 'Crack size')
+crack_plot.setLabel('left', 'Magnitude')
 crack_plot.showGrid(x=True, y=True, alpha=0.25)
 crack_plot.setYRange(0.0, 1.0, padding=0.0)
 crack_curve = crack_plot.plot(
@@ -329,7 +327,7 @@ crack_curve = crack_plot.plot(
     connect='pairs',
 )
 
-reserved_row_layout.addWidget(reserved_container, 1)
+lower_row_layout.addWidget(crack_frame, 1)
 
 # -------------------------
 # CONTROLS (UNDER LEFT 3D PANEL)
@@ -372,7 +370,7 @@ serial_command_row.addWidget(serial_send_button)
 serial_response_box = QtWidgets.QPlainTextEdit()
 serial_response_box.setReadOnly(True)
 serial_response_box.setMinimumWidth(320)
-serial_response_box.setMaximumHeight(80)
+serial_response_box.setMaximumHeight(SERIAL_RESPONSE_BOX_MAX_HEIGHT)
 serial_response_box.setPlainText(latest_command_response_text)
 
 serial_controls_layout = QtWidgets.QVBoxLayout()
@@ -425,8 +423,8 @@ write_controls_container = QtWidgets.QWidget()
 write_controls_container.setLayout(write_controls_layout)
 controls_layout.addWidget(write_controls_container)
 
-reserved_row_layout.insertWidget(0, controls_container, 1)
-main_layout.addLayout(reserved_row_layout, 0)
+lower_row_layout.insertWidget(0, controls_container, 1)
+main_layout.addLayout(lower_row_layout, 0)
 main_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
 main_widget.setFocus()
 main_widget.show()
@@ -437,6 +435,7 @@ main_widget.show()
 def keyPressEvent(event):
     global paused, xy_start_index
     global latest_average_text, last_average_update_time, ui_start_monotonic
+    global latest_nonzero_mag_value, latest_nonzero_width_value
     if event.key() == QtCore.Qt.Key_Space:
         # Clear all buffered data so both plots restart from a clean state.
         timestamps.clear()
@@ -465,6 +464,8 @@ def keyPressEvent(event):
         latest_average_text = f"Avg last {RECENT_FADE_POINTS}: waiting for data..."
         average_label.setText(latest_average_text)
         last_average_update_time = time.monotonic()
+        latest_nonzero_mag_value = None
+        latest_nonzero_width_value = None
         crack_curve.setData([], [])
     elif event.key() == QtCore.Qt.Key_P:
         paused = not paused
@@ -510,13 +511,13 @@ def parse_keyed_fields(line):
             continue
     return fields
 
-def append_crack_sample(line):
+def append_mag_sample(line):
     if ">" not in line or ":" not in line:
         return
 
     fields = parse_keyed_fields(line)
-    crack_val = fields.get("crack")
-    if crack_val is None or not np.isfinite(crack_val) or float(crack_val) == 0.0:
+    mag_val = fields.get("mag")
+    if mag_val is None or not np.isfinite(mag_val) or float(mag_val) == 0.0:
         return
 
     t_val = fields.get("t")
@@ -527,7 +528,7 @@ def append_crack_sample(line):
 
     t_event = float(t_val)
     crack_times.append(t_event)
-    crack_sizes.append(float(crack_val))
+    crack_sizes.append(float(mag_val))
 
 def parse_serial_line(line):
     if not line:
@@ -539,21 +540,27 @@ def parse_serial_line(line):
         t = fields.get("t")
         l_val = fields.get("l")
         rp_val = fields.get("rp", 0.0)
+        mag_val = fields.get("mag")
+        width_val = fields.get("width")
         if t is None or l_val is None:
             raise ValueError("Missing required keyed fields")
         if not np.isfinite(t) or not np.isfinite(l_val):
             raise ValueError("Non-finite required keyed fields")
         if not np.isfinite(rp_val):
             rp_val = 0.0
-        return float(t), float(rp_val), float(l_val)
+        if mag_val is not None and not np.isfinite(mag_val):
+            mag_val = None
+        if width_val is not None and not np.isfinite(width_val):
+            width_val = None
+        return float(t), float(rp_val), float(l_val), mag_val, width_val
 
     t, s1, s2 = map(float, line.split())
     if not np.isfinite(t) or not np.isfinite(s1) or not np.isfinite(s2):
         raise ValueError("Non-finite whitespace fields")
-    return t, s1, s2
+    return t, s1, s2, None, None
 
-def append_sensor_sample(t, s1, s2):
-    global latest_readout_text
+def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None):
+    global latest_readout_text, latest_nonzero_mag_value, latest_nonzero_width_value
     timestamps.append(t)
     sensor1.append(s1)
     sensor2.append(s2)
@@ -562,7 +569,15 @@ def append_sensor_sample(t, s1, s2):
         csv_writer.writerow([t, s1, s2])
         csv_file.flush()
 
-    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f}"
+    if mag_val is not None and float(mag_val) != 0.0:
+        latest_nonzero_mag_value = float(mag_val)
+
+    if width_val is not None and float(width_val) != 0.0:
+        latest_nonzero_width_value = float(width_val)
+
+    mag_text = f"{latest_nonzero_mag_value:.6f}" if latest_nonzero_mag_value is not None else "n/a"
+    width_text = f"{latest_nonzero_width_value:.6f}" if latest_nonzero_width_value is not None else "n/a"
+    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f} | mag={mag_text} | width={width_text}"
 
 def send_serial_command():
     global latest_command_response_text
@@ -593,16 +608,16 @@ def send_serial_command():
         if not line:
             continue
 
-        append_crack_sample(line)
+        append_mag_sample(line)
 
         try:
-            t, s1, s2 = parse_serial_line(line)
-            append_sensor_sample(t, s1, s2)
+            t, s1, s2, mag_val, width_val = parse_serial_line(line)
+            append_sensor_sample(t, s1, s2, mag_val, width_val)
         except (ValueError, KeyError):
             responses.append(line)
 
     if responses:
-        latest_command_response_text = "Response:\n" + "\n".join(responses[-6:])
+        latest_command_response_text = "Response:\n" + "\n".join(responses[-SERIAL_RESPONSE_MAX_LINES:])
     else:
         latest_command_response_text = "Response: no non-sensor reply in 400 ms"
 
@@ -612,16 +627,15 @@ serial_send_button.clicked.connect(send_serial_command)
 serial_command_input.returnPressed.connect(send_serial_command)
 
 def read_serial():
-    global write_to_file_enabled
     if paused:
         ser.reset_input_buffer()
         return
     while ser.in_waiting:
         line = ser.readline().decode(errors='ignore').strip()
-        append_crack_sample(line)
+        append_mag_sample(line)
         try:
-            t, s1, s2 = parse_serial_line(line)
-            append_sensor_sample(t, s1, s2)
+            t, s1, s2, mag_val, width_val = parse_serial_line(line)
+            append_sensor_sample(t, s1, s2, mag_val, width_val)
         except (ValueError, KeyError):
             continue
 
