@@ -164,6 +164,16 @@ class ToggleAxisItem(pg.AxisItem):
 # -------------------------
 # QT SETUP
 # -------------------------
+# Keep UI scale consistent when moving between displays with different DPI.
+if hasattr(QtWidgets.QApplication, "setHighDpiScaleFactorRoundingPolicy"):
+    QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
+        QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+if hasattr(QtCore.Qt, "AA_EnableHighDpiScaling"):
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+
 app = QtWidgets.QApplication([])
 main_widget = QtWidgets.QWidget()
 main_widget.setWindowTitle("Eddy Current Scanner V5")
