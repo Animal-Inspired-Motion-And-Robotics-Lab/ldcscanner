@@ -62,6 +62,7 @@ latest_readout_text = "Incoming: waiting for data..."
 incoming_line_history = deque(maxlen=3)
 latest_average_text = "Average: waiting for data..."
 latest_command_response_text = "Response: waiting for command..."
+latest_reason_input_value = None
 latest_nonzero_mag_value = None
 latest_nonzero_width_value = None
 latest_nonzero_crack_size_value = None
@@ -551,6 +552,33 @@ def append_mag_sample(line):
     crack_times.append(t_event)
     crack_sizes.append(float(mag_val))
 
+def update_reason_input_from_line(line):
+    global latest_reason_input_value
+    if not line:
+        return
+
+    text = line.strip()
+    marker = "reject_reason="
+    idx = text.lower().find(marker)
+    if idx < 0:
+        return
+
+    value = text[idx + len(marker):].strip()
+    if not value:
+        return
+
+    for sep in ("|", ">", " ", "\t", ","):
+        sep_index = value.find(sep)
+        if sep_index >= 0:
+            value = value[:sep_index]
+            break
+
+    parsed_value = value.strip().strip("[]")
+    if parsed_value == "-":
+        return
+    if parsed_value:
+        latest_reason_input_value = parsed_value
+
 def parse_serial_line(line):
     if not line:
         raise ValueError("Empty serial line")
@@ -587,7 +615,7 @@ def parse_serial_line(line):
     return t, s1, s2, None, None, None, None
 
 def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None, crack_x_val=None, crack_size_val=None):
-    global latest_readout_text, latest_nonzero_mag_value, latest_nonzero_width_value, latest_nonzero_crack_size_value
+    global latest_readout_text, latest_nonzero_mag_value, latest_nonzero_width_value, latest_nonzero_crack_size_value, latest_reason_input_value
     timestamps.append(t)
     sensor1.append(s1)
     sensor2.append(s2)
@@ -612,7 +640,8 @@ def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None, crack_x_val=No
     mag_text = f"{latest_nonzero_mag_value:.6f}" if latest_nonzero_mag_value is not None else "n/a"
     width_text = f"{latest_nonzero_width_value:.6f}" if latest_nonzero_width_value is not None else "n/a"
     crack_size_text = f"{latest_nonzero_crack_size_value:.6f}" if latest_nonzero_crack_size_value is not None else "n/a"
-    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f} | mag={mag_text} | width={width_text} | crack_size={crack_size_text}"
+    input_text = latest_reason_input_value if latest_reason_input_value is not None else "n/a"
+    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f} | mag={mag_text} | width={width_text} | crack_size={crack_size_text} | rejected={input_text}"
 
 def send_serial_command():
     global latest_command_response_text
@@ -644,6 +673,7 @@ def send_serial_command():
             continue
 
         append_incoming_line(line)
+        update_reason_input_from_line(line)
         append_mag_sample(line)
 
         try:
@@ -669,6 +699,7 @@ def read_serial():
     while ser.in_waiting:
         line = ser.readline().decode(errors='ignore').strip()
         append_incoming_line(line)
+        update_reason_input_from_line(line)
         append_mag_sample(line)
         try:
             t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val = parse_serial_line(line)
