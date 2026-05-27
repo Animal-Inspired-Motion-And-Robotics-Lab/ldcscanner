@@ -39,7 +39,7 @@ def set_csv_output_file(filename):
     csv_file = open(CSV_FILE, "a", newline="")
     csv_writer = csv.writer(csv_file)
     if os.path.getsize(CSV_FILE) == 0:
-        csv_writer.writerow(["timestamp", "sensor1", "sensor2", "mag", "width", "crack_x", "crack_size"])
+        csv_writer.writerow(["timestamp_computer", "timestamp", "sensor1", "sensor2", "mag", "width", "crack_x", "crack_size"])
 
 set_csv_output_file(CSV_FILE)
 
@@ -631,7 +631,8 @@ def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None, crack_x_val=No
     sensor2.append(s2)
 
     if write_to_file_enabled:
-        csv_writer.writerow([t, s1, s2,
+        timestamp_computer = f"{time.time():.3f}"
+        csv_writer.writerow([timestamp_computer, t, s1, s2,
                               mag_val if mag_val is not None else "",
                               width_val if width_val is not None else "",
                               crack_x_val if crack_x_val is not None else "",
