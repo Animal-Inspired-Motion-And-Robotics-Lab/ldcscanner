@@ -39,7 +39,7 @@ def set_csv_output_file(filename):
     csv_file = open(CSV_FILE, "a", newline="")
     csv_writer = csv.writer(csv_file)
     if os.path.getsize(CSV_FILE) == 0:
-        csv_writer.writerow(["timestamp", "sensor1", "sensor2"])
+        csv_writer.writerow(["timestamp", "sensor1", "sensor2", "mag", "width", "crack_x", "crack_size"])
 
 set_csv_output_file(CSV_FILE)
 
@@ -59,10 +59,12 @@ write_to_file_enabled = False
 
 # latest serial sample readout text
 latest_readout_text = "Incoming: waiting for data..."
+incoming_line_history = deque(maxlen=3)
 latest_average_text = "Average: waiting for data..."
 latest_command_response_text = "Response: waiting for command..."
 latest_nonzero_mag_value = None
 latest_nonzero_width_value = None
+latest_nonzero_crack_size_value = None
 last_average_update_time = 0.0
 
 # XY plot tracking
@@ -338,6 +340,24 @@ controls_layout.setContentsMargins(0, 4, 0, 0)
 controls_layout.setSpacing(6)
 
 # Live incoming serial readout
+incoming_line_box = QtWidgets.QPlainTextEdit()
+incoming_line_box.setReadOnly(True)
+incoming_line_box.setMinimumWidth(320)
+incoming_line_box.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+incoming_line_box.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+incoming_line_box.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+line_height = incoming_line_box.fontMetrics().lineSpacing()
+frame_height = incoming_line_box.frameWidth() * 2
+doc_margin_height = int(incoming_line_box.document().documentMargin() * 2)
+incoming_line_box.setFixedHeight(int(line_height * 3 + frame_height + doc_margin_height))
+incoming_line_box.setPlainText("Incoming line: waiting for data...")
+
+def append_incoming_line(line):
+    if not line:
+        return
+    incoming_line_history.append(line)
+    incoming_line_box.setPlainText("\n".join(incoming_line_history))
+
 readout_label = QtWidgets.QLabel(latest_readout_text)
 readout_label.setMinimumWidth(320)
 average_label = QtWidgets.QLabel(f"Avg last {RECENT_FADE_POINTS}: waiting for data...")
@@ -346,6 +366,7 @@ average_label.setMinimumWidth(320)
 readout_layout = QtWidgets.QVBoxLayout()
 readout_layout.setContentsMargins(0, 0, 0, 0)
 readout_layout.setSpacing(2)
+readout_layout.addWidget(incoming_line_box)
 readout_layout.addWidget(readout_label)
 readout_layout.addWidget(average_label)
 
@@ -542,6 +563,8 @@ def parse_serial_line(line):
         rp_val = fields.get("rp", 0.0)
         mag_val = fields.get("mag")
         width_val = fields.get("width")
+        crack_x_val = fields.get("crack_x")
+        crack_size_val = fields.get("crack_size")
         if t is None or l_val is None:
             raise ValueError("Missing required keyed fields")
         if not np.isfinite(t) or not np.isfinite(l_val):
@@ -552,21 +575,29 @@ def parse_serial_line(line):
             mag_val = None
         if width_val is not None and not np.isfinite(width_val):
             width_val = None
-        return float(t), float(rp_val), float(l_val), mag_val, width_val
+        if crack_x_val is not None and not np.isfinite(crack_x_val):
+            crack_x_val = None
+        if crack_size_val is not None and not np.isfinite(crack_size_val):
+            crack_size_val = None
+        return float(t), float(rp_val), float(l_val), mag_val, width_val, crack_x_val, crack_size_val
 
     t, s1, s2 = map(float, line.split())
     if not np.isfinite(t) or not np.isfinite(s1) or not np.isfinite(s2):
         raise ValueError("Non-finite whitespace fields")
-    return t, s1, s2, None, None
+    return t, s1, s2, None, None, None, None
 
-def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None):
-    global latest_readout_text, latest_nonzero_mag_value, latest_nonzero_width_value
+def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None, crack_x_val=None, crack_size_val=None):
+    global latest_readout_text, latest_nonzero_mag_value, latest_nonzero_width_value, latest_nonzero_crack_size_value
     timestamps.append(t)
     sensor1.append(s1)
     sensor2.append(s2)
 
     if write_to_file_enabled:
-        csv_writer.writerow([t, s1, s2])
+        csv_writer.writerow([t, s1, s2,
+                              mag_val if mag_val is not None else "",
+                              width_val if width_val is not None else "",
+                              crack_x_val if crack_x_val is not None else "",
+                              crack_size_val if crack_size_val is not None else ""])
         csv_file.flush()
 
     if mag_val is not None and float(mag_val) != 0.0:
@@ -575,9 +606,13 @@ def append_sensor_sample(t, s1, s2, mag_val=None, width_val=None):
     if width_val is not None and float(width_val) != 0.0:
         latest_nonzero_width_value = float(width_val)
 
+    if crack_size_val is not None and float(crack_size_val) != 0.0:
+        latest_nonzero_crack_size_value = float(crack_size_val)
+
     mag_text = f"{latest_nonzero_mag_value:.6f}" if latest_nonzero_mag_value is not None else "n/a"
     width_text = f"{latest_nonzero_width_value:.6f}" if latest_nonzero_width_value is not None else "n/a"
-    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f} | mag={mag_text} | width={width_text}"
+    crack_size_text = f"{latest_nonzero_crack_size_value:.6f}" if latest_nonzero_crack_size_value is not None else "n/a"
+    latest_readout_text = f"Incoming: t={t:.3f} | s1={s1:.6f} | s2={s2:.6f} | mag={mag_text} | width={width_text} | crack_size={crack_size_text}"
 
 def send_serial_command():
     global latest_command_response_text
@@ -608,11 +643,12 @@ def send_serial_command():
         if not line:
             continue
 
+        append_incoming_line(line)
         append_mag_sample(line)
 
         try:
-            t, s1, s2, mag_val, width_val = parse_serial_line(line)
-            append_sensor_sample(t, s1, s2, mag_val, width_val)
+            t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val = parse_serial_line(line)
+            append_sensor_sample(t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val)
         except (ValueError, KeyError):
             responses.append(line)
 
@@ -632,10 +668,11 @@ def read_serial():
         return
     while ser.in_waiting:
         line = ser.readline().decode(errors='ignore').strip()
+        append_incoming_line(line)
         append_mag_sample(line)
         try:
-            t, s1, s2, mag_val, width_val = parse_serial_line(line)
-            append_sensor_sample(t, s1, s2, mag_val, width_val)
+            t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val = parse_serial_line(line)
+            append_sensor_sample(t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val)
         except (ValueError, KeyError):
             continue
 
