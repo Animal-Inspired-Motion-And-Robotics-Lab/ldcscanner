@@ -65,3 +65,10 @@ MATERIAL_COLOR_MAP = {
     "Aluminum": "#801fee",  # green
     "Titanium": "#4E0696",  # orange
 }
+
+# --- Crack color map -------------------------------------------------
+CRACK_COLOR_MAP = {
+    "Crack 1": "#eed40c",
+    "Crack 2": "#ff7f0e",
+    "Crack 3": "#d0260f", 
+}
