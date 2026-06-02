@@ -288,7 +288,7 @@ class CsvLogger:
     """
 
     HEADER = ["timestamp_computer", "timestamp", "sensor1", "sensor2",
-              "mag", "width", "crack_x", "crack_size"]
+              "mag", "width", "crack_x", "crack_size", "serial out", "response"]
 
     def __init__(self, filename):
         self._file = None
@@ -317,14 +317,17 @@ class CsvLogger:
         if os.path.getsize(self.path) == 0:
             self._writer.writerow(self.HEADER)
 
-    def write_sample(self, t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val):
+    def write_sample(self, t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val,
+                     serial_out="", response=""):
         """Append one sample row, stamping the host clock, and flush."""
         timestamp_computer = f"{time.time():.3f}"
         self._writer.writerow([timestamp_computer, t, s1, s2,
                                mag_val if mag_val is not None else "",
                                width_val if width_val is not None else "",
                                crack_x_val if crack_x_val is not None else "",
-                               crack_size_val if crack_size_val is not None else ""])
+                               crack_size_val if crack_size_val is not None else "",
+                               serial_out,
+                               response])
         self._file.flush()
 
     @property
@@ -469,6 +472,8 @@ class ScannerState:
         self.latest_nonzero_mag = None
         self.latest_nonzero_width = None
         self.latest_nonzero_crack_size = None
+        self.pending_serial_out = ""
+        self.pending_response = ""
         self.last_average_update_time = 0.0
 
         # View tracking.
@@ -504,6 +509,19 @@ class ScannerState:
         self.crack_mags.append(mag_val)
         self.crack_sizes.append(crack_size_val if crack_size_val is not None else 0.0)
 
+    def stage_command_exchange(self, serial_out, response):
+        """Queue one command/response pair to annotate the next logged sample."""
+        self.pending_serial_out = str(serial_out or "")
+        self.pending_response = str(response or "")
+
+    def consume_pending_command_exchange(self):
+        """Return and clear any queued command/response metadata."""
+        serial_out = self.pending_serial_out
+        response = self.pending_response
+        self.pending_serial_out = ""
+        self.pending_response = ""
+        return serial_out, response
+
     def ingest_sample(self, t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val, csv_logger):
         """Store one parsed sample, optionally log it, and refresh readout text."""
         self.timestamps.append(t)
@@ -511,7 +529,11 @@ class ScannerState:
         self.sensor2.append(s2)
 
         if self.write_to_file_enabled:
-            csv_logger.write_sample(t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val)
+            serial_out, response = self.consume_pending_command_exchange()
+            csv_logger.write_sample(
+                t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val,
+                serial_out, response
+            )
 
         if mag_val is not None and float(mag_val) != 0.0:
             self.latest_nonzero_mag = float(mag_val)
@@ -1094,6 +1116,9 @@ def send_serial_command():
         response_text = "Response:\n" + "\n".join(responses[-SERIAL_RESPONSE_MAX_LINES:])
     else:
         response_text = "Response: no non-sensor reply in 400 ms"
+
+    first_response = responses[0] if responses else ""
+    state.stage_command_exchange(command, first_response)
 
     serial_response_box.setPlainText(response_text)
 
