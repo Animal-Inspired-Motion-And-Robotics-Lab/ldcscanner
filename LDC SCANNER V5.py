@@ -33,6 +33,22 @@ from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 pg.setConfigOptions(antialias=True)
 
 
+# --- Plot line-width scaling (percent) ------------------------------------
+# 100 means "use the current/original width".
+SURFACE_TRACE_LINE_WIDTH_PERCENT = 100
+RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT = 150
+RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT = 150
+CRACK_PLOT_LINE_WIDTH_PERCENT = 150
+
+
+def scale_line_width(base_width, percent):
+    """Return ``base_width`` scaled by a percentage (100 => unchanged)."""
+    try:
+        return float(base_width) * (float(percent) / 100.0)
+    except (TypeError, ValueError):
+        return float(base_width)
+
+
 # ---------------------------------------------------------------------------
 # 1. Configuration
 # ---------------------------------------------------------------------------
@@ -873,7 +889,7 @@ surface_view.addItem(surface_item)
 surface_trace = gl.GLLinePlotItem(
     pos=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]], dtype=np.float32),
     color=(1.0, 0.65, 0.2, 1.0),
-    width=2.0,
+    width=scale_line_width(2.0, SURFACE_TRACE_LINE_WIDTH_PERCENT),
     antialias=True,
     mode='line_strip',
 )
@@ -930,10 +946,17 @@ def toggle_right_x_mode():
 bottom_axis.toggled.connect(toggle_right_x_mode)
 
 initial_xy_view_state = plot_xy.getViewBox().getState(copy=True)
-xy_curve = plot_xy.plot(pen='r')
+xy_curve = plot_xy.plot(pen=pg.mkPen('r', width=scale_line_width(1.0, RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT)))
 recent_segment_curves = []
 for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
-    recent_segment_curves.append(plot_xy.plot(pen=pg.mkPen((255, 0, 0), width=3)))
+    recent_segment_curves.append(
+        plot_xy.plot(
+            pen=pg.mkPen(
+                (255, 0, 0),
+                width=scale_line_width(3.0, RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT)
+            )
+        )
+    )
 
 # Lower row: controls (left) and crack-event plot (right).
 lower_row_layout = QtWidgets.QHBoxLayout()
@@ -962,7 +985,7 @@ crack_plot.setYRange(0.0, 1.0, padding=0.0)
 crack_curve = crack_plot.plot(
     [],
     [],
-    pen=pg.mkPen((255, 190, 140, 230), width=1),
+    pen=pg.mkPen((255, 190, 140, 230), width=scale_line_width(1.0, CRACK_PLOT_LINE_WIDTH_PERCENT)),
     connect='pairs',
 )
 
@@ -1549,6 +1572,11 @@ def update():
     read_serial()
     readout_label.setText(state.readout_text)
 
+    # Re-apply user-configured line widths each frame so style changes never
+    # get lost if any item reinitializes internal pen/GL options.
+    xy_curve.setPen(pg.mkPen('r', width=scale_line_width(1.0, RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT)))
+    crack_curve.setPen(pg.mkPen((255, 190, 140, 230), width=scale_line_width(1.0, CRACK_PLOT_LINE_WIDTH_PERCENT)))
+
     x_all = np.array(state.timestamps)
     y1_all = np.array(state.sensor1)
     y2_all = np.array(state.sensor2)
@@ -1572,7 +1600,6 @@ def update():
         t_min = 0.0
         t_now = float(time.monotonic() - state.ui_start_monotonic)
 
-    crack_plot.setXRange(t_min, max(t_now, t_min + 1e-6), padding=0.0)
     crack_count = min(len(state.crack_times), len(state.crack_mags), len(state.crack_sizes))
     if crack_count > 0:
         crack_times_arr = np.asarray(list(state.crack_times)[-crack_count:], dtype=float)
@@ -1621,7 +1648,10 @@ def update():
         meshdata = gl.MeshData(vertexes=vertices, faces=faces)
         meshdata.setFaceColors(face_colors)
         surface_item.setMeshData(meshdata=meshdata)
-        surface_trace.setData(pos=line_pos)
+        surface_trace.setData(
+            pos=line_pos,
+            width=scale_line_width(2.0, SURFACE_TRACE_LINE_WIDTH_PERCENT),
+        )
         surface_head.setData(pos=line_pos[-1:].copy())
         surface_view.opts['center'] = QtGui.QVector3D(0.0, 0.0, 0.0)
 
@@ -1647,6 +1677,15 @@ def update():
 
     set_right_x_mode(state.right_x_mode)
 
+    # Keep crack-plot x-axis synced to the upper plot whenever the upper plot
+    # is using timestamp on x (explicit TIME mode or auto time fallback).
+    right_uses_time_x = (state.right_x_mode == "TIME") or state.right_plot_auto_time_fallback
+    if right_uses_time_x:
+        crack_plot.setXLink(plot_xy)
+    else:
+        crack_plot.setXLink(None)
+        crack_plot.setXRange(t_min, max(t_now, t_min + 1e-6), padding=0.0)
+
     xy_curve.setData(x_right, y_right)
 
     # Highlight most recent trajectory with red -> white segment gradient.
@@ -1658,7 +1697,12 @@ def update():
         shades = np.linspace(0, 255, seg_count).astype(int)
         for i in range(seg_count):
             seg_curve = recent_segment_curves[i]
-            seg_curve.setPen(pg.mkPen((255, int(shades[i]), int(shades[i]), 255), width=3))
+            seg_curve.setPen(
+                pg.mkPen(
+                    (255, int(shades[i]), int(shades[i]), 255),
+                    width=scale_line_width(3.0, RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT)
+                )
+            )
             seg_curve.setData([tail_x[i], tail_x[i + 1]], [tail_y[i], tail_y[i + 1]])
         for i in range(seg_count, len(recent_segment_curves)):
             recent_segment_curves[i].setData([], [])
