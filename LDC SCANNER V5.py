@@ -11,7 +11,7 @@
 #   2. Serial parsing      — pure functions that turn a received line into numbers
 #   3. Surface geometry    — pure helpers that build the 3D ribbon mesh
 #   4. CsvLogger           — owns the output CSV file
-#   5. SerialManager       — owns the serial port (connect/disconnect at runtime)
+#   5. Data sources        — SerialManager (live) + CsvReplaySource (simulated)
 #   6. ScannerState        — all live runtime state + sample ingestion
 #   7. Runtime objects     — create the logger / state / serial manager
 #   8. Qt user interface   — widget construction (built once, top to bottom)
@@ -44,6 +44,11 @@ BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400]
 
 # --- CSV output ------------------------------------------------------------
 CSV_FILE = "test.csv"               # default output file (editable in the UI)
+
+# --- CSV replay (simulation) ----------------------------------------------
+REPLAY_DEFAULT_SPEED = 1.0          # playback speed multiplier for CSV simulation
+REPLAY_SCRUB_ACCEL = 1.3           # arrow-key hold: step multiplier per auto-repeat
+REPLAY_SCRUB_MAX_STEP = 500        # max samples scrubbed per auto-repeat while holding
 
 # --- Live data buffers -----------------------------------------------------
 MAX_POINTS = 5000                   # ring-buffer length for every sample deque
@@ -340,7 +345,7 @@ class CsvLogger:
 
 
 # ---------------------------------------------------------------------------
-# 5. SerialManager — owns the serial port (connect/disconnect at runtime)
+# 5. Data sources — live serial port + simulated CSV replay
 # ---------------------------------------------------------------------------
 
 class SerialManager:
@@ -352,6 +357,8 @@ class SerialManager:
     no-op when disconnected, and any hardware exception (device unplugged
     mid-stream) auto-disconnects and fires ``on_change`` so the UI can react.
     """
+
+    supports_commands = True            # live link accepts two-way console commands
 
     def __init__(self, baud_default):
         self.port = None                    # serial.Serial or None
@@ -439,6 +446,183 @@ class SerialManager:
             self.on_change()
 
 
+class CsvReplaySource:
+    """Replays a recorded scanner CSV as if it were arriving live over serial.
+
+    Exposes the same minimal interface the read loop relies on
+    (``is_connected`` / ``in_waiting`` / ``readline`` / ``reset_input_buffer`` /
+    ``write`` / ``disconnect`` / ``close``), so the rest of the program treats a
+    replay exactly like a real port.  Each telemetry row is reconstructed into a
+    keyed ``t:..>rp:..>l:..>...`` line — identical in shape to what the scanner
+    emits — and released according to the recorded ``timestamp_computer``
+    cadence, scaled by ``speed``.  Playback advances only while the read loop is
+    polling, so the P-key pause (which stops polling) naturally freezes it.
+    """
+
+    supports_commands = False           # nothing to talk back to in a recording
+
+    # CSV columns -> reconstructed keyed-line fields (sensor1=R_p, sensor2=L).
+    _OPTIONAL_FIELDS = (("mag", "mag"), ("width", "width"),
+                        ("crack_x", "crack_x"), ("crack_size", "crack_size"))
+
+    def __init__(self, path, speed=REPLAY_DEFAULT_SPEED):
+        self.path = str(path)
+        self.speed = max(float(speed), 1e-6)
+        self.port_name = os.path.basename(self.path)
+        self.baudrate = None
+        self.status_text = "CSV simulation: idle"
+        self.on_change = None
+        self.finished = False
+
+        self._rows = self._load(self.path)          # list of (offset_sec, line_bytes)
+        if not self._rows:
+            raise ValueError("No replayable telemetry rows found in CSV")
+        self._idx = 0                               # next row not yet released
+        self._queue = deque()                       # released, not yet read
+        self._playback_t = 0.0                      # virtual seconds into recording
+        self._last_real = None                      # monotonic stamp of last advance
+        self._active = False
+
+    @classmethod
+    def _load(cls, path):
+        """Read ``path`` into ``[(offset_seconds, keyed_line_bytes), ...]``.
+
+        Offsets come from the ``timestamp_computer`` column so playback matches
+        the original real-world arrival cadence; rows missing the required
+        ``timestamp``/``sensor2`` (L) values are skipped, and a row without a
+        usable host timestamp inherits the previous offset (emitted together).
+        """
+        rows = []
+        base_t = None
+        prev_offset = 0.0
+        with open(path, newline="") as handle:
+            for raw in csv.DictReader(handle):
+                t = (raw.get("timestamp") or "").strip()
+                l_val = (raw.get("sensor2") or "").strip()
+                if not t or not l_val:
+                    continue
+                rp = (raw.get("sensor1") or "").strip() or "0"
+                parts = [f"t:{t}", f"rp:{rp}", f"l:{l_val}"]
+                for key, column in cls._OPTIONAL_FIELDS:
+                    value = (raw.get(column) or "").strip()
+                    if value:
+                        parts.append(f"{key}:{value}")
+                line = ">".join(parts).encode("utf-8")
+
+                tc_text = (raw.get("timestamp_computer") or "").strip()
+                try:
+                    tc_val = float(tc_text)
+                except ValueError:
+                    tc_val = None
+                if tc_val is None:
+                    offset = prev_offset
+                else:
+                    if base_t is None:
+                        base_t = tc_val
+                    # Clamp monotonic so out-of-order stamps never rewind playback.
+                    offset = max(tc_val - base_t, prev_offset)
+                prev_offset = offset
+                rows.append((offset, line))
+        return rows
+
+    @property
+    def is_connected(self):
+        return self._active and not self.finished
+
+    def start(self):
+        """Begin (or restart) playback from the top of the recording."""
+        self._idx = 0
+        self._queue.clear()
+        self._playback_t = 0.0
+        self._last_real = None
+        self._active = True
+        self.finished = False
+        self.status_text = (
+            f"Simulating {self.port_name} @ {self.speed:g}x ({len(self._rows)} samples)"
+        )
+        self._notify()
+
+    def _advance(self):
+        """Move the playback clock forward and release any now-due rows."""
+        now = time.monotonic()
+        if self._last_real is None:
+            self._last_real = now
+            return
+        self._playback_t += (now - self._last_real) * self.speed
+        self._last_real = now
+        while self._idx < len(self._rows) and self._rows[self._idx][0] <= self._playback_t:
+            self._queue.append(self._rows[self._idx][1])
+            self._idx += 1
+
+    @property
+    def in_waiting(self):
+        if not self.is_connected:
+            return 0
+        self._advance()
+        if not self._queue and self._idx >= len(self._rows):
+            self._finish("end of file")
+            return 0
+        return len(self._queue)
+
+    def readline(self):
+        return self._queue.popleft() if self._queue else b""
+
+    # --- Manual time scrubbing (arrow keys) --------------------------------
+    @property
+    def position(self):
+        """Number of rows played so far (0..total)."""
+        return self._idx
+
+    @property
+    def total(self):
+        return len(self._rows)
+
+    def window_lines(self, max_points=MAX_POINTS):
+        """Keyed lines for the visible window ending at the current position."""
+        start = max(0, self._idx - int(max_points))
+        return [line for _, line in self._rows[start:self._idx]]
+
+    def set_position(self, index):
+        """Jump playback to ``index`` (clamped) and re-align the clock so that
+        resuming auto-play continues seamlessly from the new spot."""
+        index = max(0, min(int(index), len(self._rows)))
+        self._idx = index
+        self._queue.clear()
+        self._playback_t = self._rows[index - 1][0] if index > 0 else 0.0
+        self._last_real = None              # re-base on the next auto-advance poll
+        if index < len(self._rows):
+            # Scrubbing back into the recording re-arms it so P can resume play.
+            self.finished = False
+            self._active = True
+        self.status_text = f"Scrubbed to sample {index}/{len(self._rows)}"
+        self._notify()
+        return index
+
+    def reset_input_buffer(self):
+        # Freeze the playback clock (used while paused) without dropping queued
+        # rows; the next poll re-bases timing from "now" so no jump occurs.
+        self._last_real = None
+
+    def write(self, data):
+        raise serial.SerialException("CSV simulation: command sending disabled")
+
+    def disconnect(self, reason=None):
+        self._finish(reason or "stopped")
+
+    def _finish(self, reason):
+        self._active = False
+        self.finished = True
+        self.status_text = f"Simulation finished ({reason})"
+        self._notify()
+
+    def close(self):
+        self._active = False
+
+    def _notify(self):
+        if self.on_change is not None:
+            self.on_change()
+
+
 # ---------------------------------------------------------------------------
 # 6. ScannerState — all live runtime state + sample ingestion
 # ---------------------------------------------------------------------------
@@ -482,6 +666,7 @@ class ScannerState:
         self.right_plot_auto_time_fallback = False
         self.crack_y_mode = "mag"                # "mag" or "crack_size"
         self.ui_start_monotonic = time.monotonic()
+        self.scrub_velocity = 1.0                # arrow-key time-scrub step (grows on hold)
 
     def reset(self):
         """Clear buffered data so both plots restart from a clean state."""
@@ -522,13 +707,18 @@ class ScannerState:
         self.pending_response = ""
         return serial_out, response
 
-    def ingest_sample(self, t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val, csv_logger):
-        """Store one parsed sample, optionally log it, and refresh readout text."""
+    def ingest_sample(self, t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val,
+                      csv_logger, log=True):
+        """Store one parsed sample, optionally log it, and refresh readout text.
+
+        ``log=False`` ingests into the buffers without writing to the CSV — used
+        when rebuilding the view during an arrow-key time scrub of a replay.
+        """
         self.timestamps.append(t)
         self.sensor1.append(s1)
         self.sensor2.append(s2)
 
-        if self.write_to_file_enabled:
+        if log and self.write_to_file_enabled:
             serial_out, response = self.consume_pending_command_exchange()
             csv_logger.write_sample(
                 t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val,
@@ -563,6 +753,11 @@ serial_mgr = SerialManager(BAUDRATE)
 csv_logger = CsvLogger(CSV_FILE)
 state = ScannerState()
 
+# The read loop drains whichever source ``source`` points at: the live serial
+# port in "Live Serial" mode, or a CsvReplaySource while simulating from a file.
+replay_source = None                # created when a CSV simulation is started
+source = serial_mgr                 # active data source for the read loop
+
 
 # ---------------------------------------------------------------------------
 # 8. Qt user interface
@@ -580,6 +775,34 @@ if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
 app = QtWidgets.QApplication([])
+
+# Force readable light-on-dark text for the combo boxes / spin box.  Without
+# this the popup list (a separate QAbstractItemView) inherits dark-grey text on
+# a black background and is illegible until an item is hovered.
+app.setStyleSheet(
+    """
+    QComboBox, QDoubleSpinBox {
+        background-color: #1e1e1e;
+        color: #e6e6e6;
+        border: 1px solid #555555;
+        border-radius: 3px;
+        padding: 2px 6px;
+    }
+    QComboBox:disabled, QDoubleSpinBox:disabled {
+        color: #888888;
+        background-color: #161616;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #1e1e1e;
+        color: #e6e6e6;
+        border: 1px solid #555555;
+        outline: none;
+        selection-background-color: #3a6ea5;
+        selection-color: #ffffff;
+    }
+    """
+)
+
 main_widget = QtWidgets.QWidget()
 main_widget.setWindowTitle("Eddy Current Scanner V5")
 main_layout = QtWidgets.QVBoxLayout(main_widget)
@@ -785,22 +1008,61 @@ baud_combo.setToolTip("Baud rate")
 connect_button = QtWidgets.QPushButton("Connect")
 connect_button.setMinimumWidth(100)
 
+# Data-source mode: live serial vs. replaying a recorded CSV.
+mode_combo = QtWidgets.QComboBox()
+mode_combo.addItem("Live Serial", "serial")
+mode_combo.addItem("Simulate CSV", "csv")
+mode_combo.setToolTip("Stream live from a serial port, or simulate from a recorded CSV")
+
+# CSV-simulation widgets (shown only in "Simulate CSV" mode).
+csv_path_input = QtWidgets.QLineEdit()
+csv_path_input.setPlaceholderText("CSV file to replay")
+csv_path_input.setMinimumWidth(160)
+csv_path_input.setToolTip("Recorded scanner CSV to stream from")
+
+csv_browse_button = QtWidgets.QPushButton("Browse…")
+csv_browse_button.setMinimumWidth(80)
+
+speed_label = QtWidgets.QLabel("Speed")
+speed_label.setStyleSheet("font-size: 10px; color: #bbbbbb;")
+speed_spin = QtWidgets.QDoubleSpinBox()
+speed_spin.setRange(0.1, 100.0)
+speed_spin.setSingleStep(0.5)
+speed_spin.setValue(REPLAY_DEFAULT_SPEED)
+speed_spin.setSuffix("x")
+speed_spin.setToolTip("Playback speed multiplier (1x = original real-time cadence)")
+
+mode_row = QtWidgets.QHBoxLayout()
+mode_row.setContentsMargins(0, 0, 0, 0)
+mode_row.setSpacing(4)
+mode_row.addWidget(mode_combo, 1)
+
 connection_row1 = QtWidgets.QHBoxLayout()
 connection_row1.setContentsMargins(0, 0, 0, 0)
 connection_row1.setSpacing(4)
 connection_row1.addWidget(port_combo, 1)
 connection_row1.addWidget(refresh_button)
 
+csv_row = QtWidgets.QHBoxLayout()
+csv_row.setContentsMargins(0, 0, 0, 0)
+csv_row.setSpacing(4)
+csv_row.addWidget(csv_path_input, 1)
+csv_row.addWidget(csv_browse_button)
+
 connection_row2 = QtWidgets.QHBoxLayout()
 connection_row2.setContentsMargins(0, 0, 0, 0)
 connection_row2.setSpacing(4)
 connection_row2.addWidget(baud_combo)
+connection_row2.addWidget(speed_label)
+connection_row2.addWidget(speed_spin)
 connection_row2.addWidget(connect_button, 1)
 
 connection_status_label = QtWidgets.QLabel(serial_mgr.status_text)
 connection_status_label.setStyleSheet("font-size: 10px; color: #bbbbbb;")
 
+connection_layout.addLayout(mode_row)
 connection_layout.addLayout(connection_row1)
+connection_layout.addLayout(csv_row)
 connection_layout.addLayout(connection_row2)
 connection_layout.addWidget(connection_status_label)
 
@@ -816,8 +1078,56 @@ def refresh_ports():
         port_combo.setCurrentIndex(default_idx)
 
 
+def current_mode():
+    """Return the active data-source mode: ``"serial"`` or ``"csv"``."""
+    return mode_combo.currentData() or "serial"
+
+
+def replay_active():
+    """True when a CSV replay is currently streaming."""
+    return replay_source is not None and replay_source.is_connected
+
+
+def browse_csv():
+    """Pick a CSV file to replay via a file dialog."""
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        main_widget, "Select CSV to simulate", csv_path_input.text(),
+        "CSV files (*.csv);;All files (*)"
+    )
+    if path:
+        csv_path_input.setText(path)
+
+
+def start_replay():
+    """Load the selected CSV and begin streaming it as a simulated source."""
+    global source, replay_source
+    path = csv_path_input.text().strip()
+    if not path:
+        connection_status_label.setText("No CSV selected")
+        return
+    try:
+        new_source = CsvReplaySource(path, speed=speed_spin.value())
+    except (OSError, ValueError) as exc:
+        connection_status_label.setText(f"Replay failed: {exc}")
+        return
+    replay_source = new_source
+    replay_source.on_change = set_connection_ui_state
+    source = replay_source
+    state.reset()                       # start the plots from a clean slate
+    replay_source.start()
+
+
+def stop_replay():
+    """Stop the active CSV replay (leaves it parked, finished)."""
+    if replay_source is not None:
+        replay_source.disconnect("stopped")
+
+
 def toggle_connection():
-    """Connect using the selected port + baud, or disconnect if already open."""
+    """Connect/disconnect the serial link, or start/stop the CSV replay."""
+    if current_mode() == "csv":
+        stop_replay() if replay_active() else start_replay()
+        return
     if serial_mgr.is_connected:
         serial_mgr.disconnect()
         return
@@ -834,19 +1144,56 @@ def toggle_connection():
         refresh_ports()
 
 
+def on_mode_changed():
+    """Switch data-source mode, tearing down whatever the other mode was using."""
+    global source
+    if current_mode() == "serial":
+        if replay_active():
+            replay_source.disconnect("mode switch")
+        source = serial_mgr
+    else:
+        # Drop any live link so two sources never feed the buffers at once.
+        if serial_mgr.is_connected:
+            serial_mgr.disconnect("simulation mode")
+        source = replay_source if replay_active() else serial_mgr
+    set_connection_ui_state()
+
+
 def set_connection_ui_state():
-    """Sync the connection cluster widgets with the current serial_mgr state."""
-    connected = serial_mgr.is_connected
-    connect_button.setText("Disconnect" if connected else "Connect")
-    connection_status_label.setText(serial_mgr.status_text)
-    # Lock port/baud selection while connected — disconnect first to change.
-    port_combo.setEnabled(not connected)
-    baud_combo.setEnabled(not connected)
-    refresh_button.setEnabled(not connected)
+    """Sync the connection cluster widgets with the active source's state."""
+    is_serial = current_mode() == "serial"
+
+    # Show only the widgets relevant to the current mode.
+    for widget in (port_combo, refresh_button, baud_combo):
+        widget.setVisible(is_serial)
+    for widget in (csv_path_input, csv_browse_button, speed_label, speed_spin):
+        widget.setVisible(not is_serial)
+
+    if is_serial:
+        connected = serial_mgr.is_connected
+        connect_button.setText("Disconnect" if connected else "Connect")
+        connection_status_label.setText(serial_mgr.status_text)
+        # Lock port/baud selection while connected — disconnect first to change.
+        port_combo.setEnabled(not connected)
+        baud_combo.setEnabled(not connected)
+        refresh_button.setEnabled(not connected)
+    else:
+        running = replay_active()
+        connect_button.setText("Stop Replay" if running else "Start Replay")
+        if replay_source is not None:
+            connection_status_label.setText(replay_source.status_text)
+        else:
+            connection_status_label.setText("CSV simulation: idle")
+        # Lock file/speed selection while a replay is running.
+        csv_path_input.setEnabled(not running)
+        csv_browse_button.setEnabled(not running)
+        speed_spin.setEnabled(not running)
 
 
 refresh_button.clicked.connect(refresh_ports)
 connect_button.clicked.connect(toggle_connection)
+csv_browse_button.clicked.connect(browse_csv)
+mode_combo.currentIndexChanged.connect(on_mode_changed)
 serial_mgr.on_change = set_connection_ui_state
 refresh_ports()
 set_connection_ui_state()
@@ -991,8 +1338,37 @@ main_widget.show()
 # 9. Handlers + update loop
 # ---------------------------------------------------------------------------
 
+def scrub_replay(direction, accelerating):
+    """Step the CSV replay back/forward in time by ``direction`` (-1/+1).
+
+    A single tap moves one sample; holding the key auto-repeats, and each repeat
+    grows the step geometrically so the scrub speeds up the longer it is held.
+    Scrubbing freezes auto-playback (press P to resume from the new position).
+    """
+    if not isinstance(source, CsvReplaySource):
+        return
+    if accelerating:
+        state.scrub_velocity = min(REPLAY_SCRUB_MAX_STEP,
+                                   state.scrub_velocity * REPLAY_SCRUB_ACCEL)
+    else:
+        state.scrub_velocity = 1.0
+    state.paused = True                 # manual control owns the position now
+    step = max(1, int(state.scrub_velocity))
+    before = source.position
+    if source.set_position(before + direction * step) == before:
+        return                          # already at an end — nothing to rebuild
+    rebuild_from_replay()
+
+
 def keyPressEvent(event):
-    """Keyboard shortcuts: Space=reset, P=pause, F=toggle CSV, 1/2/3=3D views."""
+    """Keyboard shortcuts: Space=reset, P=pause, F=toggle CSV, 1/2/3=3D views,
+    Left/Right=scrub a CSV replay back/forward (tap=1 step, hold accelerates)."""
+    if event.key() == QtCore.Qt.Key_Left:
+        scrub_replay(-1, event.isAutoRepeat())
+        return
+    elif event.key() == QtCore.Qt.Key_Right:
+        scrub_replay(+1, event.isAutoRepeat())
+        return
     if event.key() == QtCore.Qt.Key_Space:
         # Clear all buffered data so both plots restart from a clean state.
         state.reset()
@@ -1017,7 +1393,7 @@ def keyPressEvent(event):
     elif event.key() == QtCore.Qt.Key_P:
         state.paused = not state.paused
         if state.paused:
-            serial_mgr.reset_input_buffer()
+            source.reset_input_buffer()
         print("Paused" if state.paused else "Resumed")
     elif event.key() == QtCore.Qt.Key_F:
         write_toggle_button.setChecked(not write_toggle_button.isChecked())
@@ -1039,23 +1415,39 @@ def keyPressEvent(event):
         surface_view.update()
 
 
+def keyReleaseEvent(event):
+    """Reset the scrub acceleration when the arrow key is genuinely released."""
+    if event.isAutoRepeat():
+        return
+    if event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+        state.scrub_velocity = 1.0
+
+
 main_widget.keyPressEvent = keyPressEvent
 win.keyPressEvent = keyPressEvent
 surface_view.keyPressEvent = keyPressEvent
+main_widget.keyReleaseEvent = keyReleaseEvent
+win.keyReleaseEvent = keyReleaseEvent
+surface_view.keyReleaseEvent = keyReleaseEvent
 
 
-def consume_serial_line(line, responses=None):
+def consume_serial_line(line, responses=None, log=True, show_incoming=True):
     """Process one received serial line.
 
     Updates the incoming-line view, records any reject reason and crack event,
     then parses and ingests a sample.  Lines that are not parseable samples are
     appended to ``responses`` when a list is provided (used by the command
-    console); empty lines are ignored.
+    console); empty lines are ignored.  ``log=False`` suppresses CSV writing and
+    ``show_incoming=False`` skips the per-line readout-box repaint — both used
+    when re-ingesting many rows to rebuild the view during a replay time-scrub.
     """
     if not line:
         return
 
-    append_incoming_line(line)
+    if show_incoming:
+        append_incoming_line(line)
+    else:
+        state.incoming_history.append(line)     # keep history; defer the repaint
 
     reason = extract_reject_reason(line)
     if reason is not None:
@@ -1070,16 +1462,37 @@ def consume_serial_line(line, responses=None):
             responses.append(line)
         return
 
-    state.ingest_sample(t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val, csv_logger)
+    state.ingest_sample(t, s1, s2, mag_val, width_val, crack_x_val, crack_size_val,
+                        csv_logger, log=log)
+
+
+def rebuild_from_replay():
+    """Rebuild the live buffers from the replay's current scrub position.
+
+    Clears the buffers and re-ingests the window of rows ending at the source's
+    position (without logging), so the plots reflect exactly the recorded state
+    up to that point.  The redraw timer repaints everything on its next tick.
+    """
+    if not isinstance(source, CsvReplaySource):
+        return
+    state.reset()
+    for raw in source.window_lines():
+        consume_serial_line(raw.decode(errors="ignore").strip(), log=False, show_incoming=False)
+    # Repaint the rolling readout box once from the rebuilt history.
+    incoming_line_box.setPlainText("\n".join(state.incoming_history))
 
 
 def read_serial():
-    """Drain any pending serial input into the live buffers (skipped while paused)."""
+    """Drain the active source into the live buffers (skipped while paused).
+
+    Works identically for a live serial port and a CSV replay — both expose the
+    same ``in_waiting`` / ``readline`` interface via ``source``.
+    """
     if state.paused:
-        serial_mgr.reset_input_buffer()
+        source.reset_input_buffer()
         return
-    while serial_mgr.in_waiting:
-        line = serial_mgr.readline().decode(errors='ignore').strip()
+    while source.in_waiting:
+        line = source.readline().decode(errors='ignore').strip()
         consume_serial_line(line)
 
 
@@ -1090,14 +1503,18 @@ def send_serial_command():
         serial_response_box.setPlainText("Response: command is empty")
         return
 
-    if not serial_mgr.is_connected:
+    if not getattr(source, "supports_commands", True):
+        serial_response_box.setPlainText("Response: command sending is disabled during CSV simulation")
+        return
+
+    if not source.is_connected:
         serial_response_box.setPlainText("Response: not connected")
         return
 
     try:
-        serial_mgr.write((command + "\n").encode("utf-8"))
+        source.write((command + "\n").encode("utf-8"))
     except serial.SerialException as exc:
-        serial_mgr.disconnect("device lost")
+        source.disconnect("device lost")
         serial_response_box.setPlainText(f"Response error: {exc}")
         return
 
@@ -1105,11 +1522,11 @@ def send_serial_command():
     deadline = time.monotonic() + 0.4
 
     while time.monotonic() < deadline:
-        if serial_mgr.in_waiting <= 0:
+        if source.in_waiting <= 0:
             time.sleep(0.01)
             continue
 
-        line = serial_mgr.readline().decode(errors='ignore').strip()
+        line = source.readline().decode(errors='ignore').strip()
         consume_serial_line(line, responses)
 
     if responses:
@@ -1258,6 +1675,8 @@ timer.start(50)
 def close_resources():
     csv_logger.close()
     serial_mgr.close()
+    if replay_source is not None:
+        replay_source.close()
 
 
 app.aboutToQuit.connect(close_resources)
