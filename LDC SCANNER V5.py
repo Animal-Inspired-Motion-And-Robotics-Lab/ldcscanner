@@ -36,9 +36,9 @@ pg.setConfigOptions(antialias=True)
 # --- Plot line-width scaling (percent) ------------------------------------
 # 100 means "use the current/original width".
 SURFACE_TRACE_LINE_WIDTH_PERCENT = 100
-RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT = 150
-RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT = 150
-CRACK_PLOT_LINE_WIDTH_PERCENT = 150
+RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT = 200
+RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT = 200
+CRACK_PLOT_LINE_WIDTH_PERCENT = 300
 
 
 def scale_line_width(base_width, percent):
