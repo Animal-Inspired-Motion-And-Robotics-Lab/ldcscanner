@@ -59,17 +59,17 @@ FREQUENCY_COLOR_MAP = {
     "3.2": "#05df29"
 }
 
-FREQUENCY_COLOR_MAP = {
-    "0.955": "#022401",
-    "1.167": "#034601",
-    "1.643": "#048d21",
-    "2.415": "#05df29"
-}
+# FREQUENCY_COLOR_MAP = {
+#     "0.955": "#022E01",
+#     "1.167": "#034601",
+#     "1.643": "#048d21",
+#     "2.415": "#05df29"
+# }
 
 # --- Material group color map -------------------------------------------------
 MATERIAL_COLOR_MAP = {
-    "Stainless Steel": "#ba1ffc",  # blue
-    "Aluminum": "#9609ce",  # green
+    "Stainless Steel": "#6F049C",  # blue
+    "Aluminum": "#b506e0",  # green
     "Titanium": "#46038A",  # orange
 }
 
