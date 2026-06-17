@@ -54,16 +54,23 @@ INDUCTOR_COLOR_MAP = {
 }
 
 FREQUENCY_COLOR_MAP = {
-    "1.1": "#100386",
-    "2.4": "#0958c7",
-    "3.2": "#0fd4ea"
+    "1.1": "#023A00",
+    "2.4": "#048d21",
+    "3.2": "#05df29"
+}
+
+FREQUENCY_COLOR_MAP = {
+    "0.955": "#022401",
+    "1.167": "#034601",
+    "1.643": "#048d21",
+    "2.415": "#05df29"
 }
 
 # --- Material group color map -------------------------------------------------
 MATERIAL_COLOR_MAP = {
-    "Stainless Steel": "#b412f9",  # blue
-    "Aluminum": "#801fee",  # green
-    "Titanium": "#4E0696",  # orange
+    "Stainless Steel": "#ba1ffc",  # blue
+    "Aluminum": "#9609ce",  # green
+    "Titanium": "#46038A",  # orange
 }
 
 # --- Crack color map -------------------------------------------------
