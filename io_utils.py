@@ -125,10 +125,10 @@ def get_label_cache_path(cache_dir, source_path):
 
 def load_cached_windows(cache_path, fingerprint):
     """
-    Load cached crack windows if the fingerprint matches the source file.
+    Load cached crack windows and trim regions if the fingerprint matches the source file.
 
-    Returns a list of window dicts, an empty list if the cache exists but is
-    empty, or None if the cache is missing or stale.
+    Returns a tuple of (windows, trims), an empty tuple of lists if the cache
+    exists but is empty, or None if the cache is missing or stale.
     """
     if fingerprint is None or not cache_path.exists():
         return None
@@ -143,7 +143,7 @@ def load_cached_windows(cache_path, fingerprint):
         return None
 
     if cached_df.empty:
-        return []
+        return [], []
 
     first = cached_df.iloc[0]
     if not (
@@ -153,44 +153,89 @@ def load_cached_windows(cache_path, fingerprint):
     ):
         return None
 
-    required_data = ["manual_label", "window_start_x", "window_end_x"]
-    if any(col not in cached_df.columns for col in required_data):
-        return None
+    if "record_type" not in cached_df.columns:
+        required_data = ["manual_label", "window_start_x", "window_end_x"]
+        if any(col not in cached_df.columns for col in required_data):
+            return None
 
-    if "window_order" in cached_df.columns:
-        cached_df = cached_df.sort_values("window_order")
+        if "window_order" in cached_df.columns:
+            cached_df = cached_df.sort_values("window_order")
+
+        windows = []
+        for _, row in cached_df.iterrows():
+            start_x = row.get("window_start_x")
+            end_x   = row.get("window_end_x")
+            label   = str(row.get("manual_label", "")).strip()
+            if pd.isna(start_x) or pd.isna(end_x):
+                continue
+            if label not in CRACK_LABELS:
+                continue
+            windows.append({"start_x": float(start_x), "end_x": float(end_x),
+                            "label": label, "patch": None, "text": None})
+        return windows, []
 
     windows = []
-    for _, row in cached_df.iterrows():
+    trims = []
+    trim_df = cached_df[cached_df.get("record_type", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == "trim"] if "record_type" in cached_df.columns else pd.DataFrame()
+    window_df = cached_df[cached_df.get("record_type", pd.Series(dtype=str)).astype(str).str.strip().str.lower() != "trim"] if "record_type" in cached_df.columns else cached_df
+
+    if "event_order" in trim_df.columns:
+        trim_df = trim_df.sort_values("event_order")
+    if "window_order" in window_df.columns:
+        window_df = window_df.sort_values("window_order")
+
+    for _, row in trim_df.iterrows():
         start_x = row.get("window_start_x")
         end_x   = row.get("window_end_x")
-        label   = str(row.get("manual_label", "")).strip()
         if pd.isna(start_x) or pd.isna(end_x):
             continue
+        trims.append({"start_x": float(start_x), "end_x": float(end_x)})
+
+    for _, row in window_df.iterrows():
+        start_x = row.get("window_start_x")
+        end_x   = row.get("window_end_x")
+        if pd.isna(start_x) or pd.isna(end_x):
+            continue
+        label   = str(row.get("manual_label", "")).strip()
         if label not in CRACK_LABELS:
             continue
         windows.append({"start_x": float(start_x), "end_x": float(end_x),
-                         "label": label, "patch": None, "text": None})
-    return windows
+                        "label": label, "patch": None, "text": None})
+    return windows, trims
 
 
-def save_cached_windows(cache_path, fingerprint, windows):
-    """Persist manual crack windows to CSV for reuse in future runs."""
+def save_cached_windows(cache_path, fingerprint, windows, trims=None):
+    """Persist manual crack windows and trim regions to CSV for reuse in future runs."""
     if fingerprint is None:
         return
 
-    rows = [
-        {
+    rows = []
+    for i, w in enumerate(windows, start=1):
+        rows.append({
             "source_path":   fingerprint["source_path"],
             "file_size":     fingerprint["file_size"],
             "mtime_ns":      fingerprint["mtime_ns"],
+            "record_type":   "window",
+            "event_order":   i,
             "window_order":  i,
             "window_start_x": float(w["start_x"]),
             "window_end_x":   float(w["end_x"]),
             "manual_label":   str(w["label"]),
-        }
-        for i, w in enumerate(windows, start=1)
-    ]
+        })
+
+    if trims:
+        for i, trim in enumerate(trims, start=1):
+            rows.append({
+                "source_path":   fingerprint["source_path"],
+                "file_size":     fingerprint["file_size"],
+                "mtime_ns":      fingerprint["mtime_ns"],
+                "record_type":   "trim",
+                "event_order":   i,
+                "window_order":  "",
+                "window_start_x": float(trim["start_x"]),
+                "window_end_x":   float(trim["end_x"]),
+                "manual_label":   "",
+            })
 
     pd.DataFrame(rows).to_csv(cache_path, index=False)
 

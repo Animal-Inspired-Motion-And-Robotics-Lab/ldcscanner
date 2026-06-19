@@ -1,5 +1,5 @@
 """
-Scanimator V2 — LDC sensor crack-detection pipeline
+Scanimator V2b — LDC sensor crack-detection pipeline
 ====================================================
 
 Pipeline overview

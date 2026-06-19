@@ -105,6 +105,8 @@ def run_manual_raw_peak_labeling(
         x_col = resolve_first_existing_column(df, X_CANDIDATES)
 
         working_df = df.copy()
+        current_x_offset = 0.0
+        trim_regions_for_cache = []
 
         def get_plot_arrays(df_in):
             y_series_local = pd.to_numeric(df_in[y_col], errors="coerce")
@@ -121,16 +123,51 @@ def run_manual_raw_peak_labeling(
             raw_row_indices_local = np.flatnonzero(valid_local.to_numpy())
             return x_vals_local, y_vals_local, raw_row_indices_local, x_col_name_local
 
+        def apply_trim_regions(df_in, trim_regions):
+            working_local = df_in.copy()
+            x_offset_local = 0.0
+
+            for trim_region in trim_regions:
+                start_x_local = float(trim_region["start_x"])
+                end_x_local = float(trim_region["end_x"])
+
+                x_vals_local, _, raw_row_indices_local, _ = get_plot_arrays(working_local)
+                if len(x_vals_local) == 0:
+                    break
+
+                in_trim_local = (x_vals_local >= start_x_local) & (x_vals_local <= end_x_local)
+                if not np.any(in_trim_local):
+                    continue
+
+                drop_raw_indices_local = raw_row_indices_local[in_trim_local]
+                working_local = working_local.drop(index=working_local.index[drop_raw_indices_local]).reset_index(drop=True)
+
+                if x_col is not None and len(working_local) > 0:
+                    remaining_x_local = pd.to_numeric(working_local[x_col], errors="coerce")
+                    if remaining_x_local.notna().any():
+                        original_first_x_local = float(np.min(x_vals_local))
+                        new_first_x_local = float(np.nanmin(remaining_x_local.to_numpy(dtype=float)))
+                        if start_x_local <= original_first_x_local <= end_x_local:
+                            working_local[x_col] = remaining_x_local - new_first_x_local
+                            x_offset_local += new_first_x_local
+
+            return working_local, x_offset_local
+
+        cached_windows, cached_trims = cached if cached is not None else ([], [])
+        if cached_trims:
+            working_df, current_x_offset = apply_trim_regions(working_df, cached_trims)
+            trim_regions_for_cache.extend(cached_trims)
+
         x_vals, y_vals, raw_row_indices, x_col_name = get_plot_arrays(working_df)
 
         if len(y_vals) < 10:
             print(f"Skipping manual labels for {filename}: insufficient numeric raw samples.")
             continue
 
-        windows = list(cached) if cached is not None else []
+        windows = list(cached_windows)
         if cached is not None:
             print(
-                f"Loaded {len(windows)} cached window(s) for {filename}. "
+                f"Loaded {len(windows)} cached window(s) and {len(cached_trims)} cached trim region(s) for {filename}. "
                 "Press Enter to accept, or edit before continuing."
             )
 
@@ -243,12 +280,10 @@ def run_manual_raw_peak_labeling(
                 "Enter=finish, Backspace/Delete=remove last window."
             )
 
-            x_span = max(np.ptp(x_vals), 1e-12)
-
             def on_span_select(xmin, xmax):
                 start_x = float(min(xmin, xmax))
                 end_x   = float(max(xmin, xmax))
-                if abs(end_x - start_x) <= (0.002 * x_span):
+                if abs(end_x - start_x) <= 1e-12:
                     return
                 if active_sel["patch"] is not None:
                     active_sel["patch"].remove()
@@ -317,7 +352,7 @@ def run_manual_raw_peak_labeling(
                     refresh_window_display()
 
                 elif key == "x":
-                    nonlocal working_df, x_vals, y_vals, raw_row_indices
+                    nonlocal working_df, x_vals, y_vals, raw_row_indices, current_x_offset
 
                     if active_sel["start_x"] is None:
                         print("Drag a window first.")
@@ -336,11 +371,32 @@ def run_manual_raw_peak_labeling(
                     working_df = working_df.drop(index=working_df.index[drop_raw_indices]).reset_index(drop=True)
                     dataframes[filename] = working_df
 
+                    remap_offset = 0.0
+                    remap_axis = x_col is not None and len(working_df) > 0
+                    if remap_axis:
+                        remaining_x = pd.to_numeric(working_df[x_col], errors="coerce")
+                        if remaining_x.notna().any():
+                            original_first_x = float(np.min(x_vals))
+                            new_first_x = float(np.nanmin(remaining_x.to_numpy(dtype=float)))
+                            if start_x <= original_first_x <= end_x:
+                                remap_offset = new_first_x
+                                working_df[x_col] = remaining_x - remap_offset
+
+                    trim_regions_for_cache.append({
+                        "start_x": start_x + current_x_offset,
+                        "end_x": end_x + current_x_offset,
+                    })
+
+                    if remap_offset != 0.0:
+                        current_x_offset += remap_offset
+
                     # Remove windows that now overlap the trimmed span.
                     kept = []
                     removed_window_count = 0
                     for w in windows:
-                        overlaps = max(float(w["start_x"]), start_x) <= min(float(w["end_x"]), end_x)
+                        w_start = float(w["start_x"])
+                        w_end = float(w["end_x"])
+                        overlaps = max(w_start, start_x) <= min(w_end, end_x)
                         if overlaps:
                             removed_window_count += 1
                             if w["patch"] is not None:
@@ -348,6 +404,15 @@ def run_manual_raw_peak_labeling(
                             if w["text"] is not None:
                                 w["text"].remove()
                         else:
+                            if remap_offset != 0.0:
+                                w["start_x"] = w_start - remap_offset
+                                w["end_x"] = w_end - remap_offset
+                                if w["patch"] is not None:
+                                    w["patch"].remove()
+                                    w["patch"] = None
+                                if w["text"] is not None:
+                                    w["text"].remove()
+                                    w["text"] = None
                             kept.append(w)
                     windows[:] = kept
 
@@ -360,16 +425,22 @@ def run_manual_raw_peak_labeling(
                         plt.close(fig)
                         return
 
+                    if remap_offset != 0.0:
+                        print(
+                            f"Trimmed {trim_count} point(s) from {filename}; remapped remaining "
+                            f"{x_col_name} values to start at 0."
+                        )
+                    else:
+                        print(
+                            f"Trimmed {trim_count} point(s) from {filename}; "
+                            f"removed {removed_window_count} overlapping window(s)."
+                        )
+
                     if active_sel["patch"] is not None:
                         active_sel["patch"].remove()
                     active_sel["patch"] = None
                     active_sel["start_x"] = None
                     active_sel["end_x"] = None
-
-                    print(
-                        f"Trimmed {trim_count} point(s) from {filename}; "
-                        f"removed {removed_window_count} overlapping window(s)."
-                    )
                     refresh_window_display()
 
                 elif key in ("backspace", "delete"):
@@ -434,7 +505,7 @@ def run_manual_raw_peak_labeling(
         # ── persist cache and save labeled summary plot ────────────────────
 
         if cache_path is not None and fingerprint is not None:
-            save_cached_windows(cache_path, fingerprint, windows)
+            save_cached_windows(cache_path, fingerprint, windows, trim_regions_for_cache)
 
         _save_labeled_plot(filename, x_vals, y_vals, x_col_name, y_col,
                            windows, text_y, y_min, y_max, y_range, output_dir)
