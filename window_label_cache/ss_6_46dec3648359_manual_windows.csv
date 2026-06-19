@@ -1,1 +1,6 @@
-
+source_path,file_size,mtime_ns,record_type,event_order,window_order,window_start_x,window_end_x,manual_label
+C:\Users\newsp\UCB-O365\MECHENGR-AIMRL - General\2) Projects\Project - AFRL\4) Experiments\1) Raw Data\ECLAIR-EC Demo\All runs 6-2-26\ss_6.csv,117657,1781895289725275400,window,1,1,9469.18898029871,11120.387253897703,Crack 1
+C:\Users\newsp\UCB-O365\MECHENGR-AIMRL - General\2) Projects\Project - AFRL\4) Experiments\1) Raw Data\ECLAIR-EC Demo\All runs 6-2-26\ss_6.csv,117657,1781895289725275400,window,2,2,13080.051139048157,15239.31041990838,Crack 2
+C:\Users\newsp\UCB-O365\MECHENGR-AIMRL - General\2) Projects\Project - AFRL\4) Experiments\1) Raw Data\ECLAIR-EC Demo\All runs 6-2-26\ss_6.csv,117657,1781895289725275400,window,3,3,16618.333153903142,18632.432146974443,Crack 3
+C:\Users\newsp\UCB-O365\MECHENGR-AIMRL - General\2) Projects\Project - AFRL\4) Experiments\1) Raw Data\ECLAIR-EC Demo\All runs 6-2-26\ss_6.csv,117657,1781895289725275400,trim,1,,3507856.687251219,3530441.0560636837,
+C:\Users\newsp\UCB-O365\MECHENGR-AIMRL - General\2) Projects\Project - AFRL\4) Experiments\1) Raw Data\ECLAIR-EC Demo\All runs 6-2-26\ss_6.csv,117657,1781895289725275400,trim,2,,3550497.327456929,3567947.627890481,
