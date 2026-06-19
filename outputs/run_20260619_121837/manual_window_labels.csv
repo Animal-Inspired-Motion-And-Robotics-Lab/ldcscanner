@@ -1,0 +1,4 @@
+file,raw_y_col,raw_x_col,window_order,window_start_x,window_end_x,window_start_raw_idx,window_end_raw_idx,window_width,window_point_count,window_mean_y,window_peak_raw_idx,window_peak_raw_x,window_peak_raw_y,manual_label
+ss_12.csv, sensor2,timestamp,1,4301437.469039616,4303570.464920714,654,734,2132.9958810973912,81,2.8739951604938274,691,4302386.0,2.899558,Crack 3
+ss_12.csv, sensor2,timestamp,2,4293299.820888202,4296221.487515252,336,448,2921.6666270503774,113,2.853446831858407,398,4294869.0,2.857116,Crack 1
+ss_12.csv, sensor2,timestamp,3,4297995.996693644,4300236.538585553,520,608,2240.5418919092044,89,2.8627378988764045,561,4299040.0,2.874726,Crack 2

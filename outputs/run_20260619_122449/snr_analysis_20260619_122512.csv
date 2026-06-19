@@ -1,0 +1,2 @@
+file,x_col,y_col,n_samples,noise_floor,noise_sigma,signal_amplitude,snr_linear,snr_db,peak_count,peak_indices,peak_snr_db_values,peak_labels,peak_height_threshold
+titan_4.csv,sensor1, sensor2,2468,2.768494419416547,0.03497996510134386,0.01471979452054839,0.4208064381397249,-7.518352486061298,3,1326;1455;1624,-inf;-7.518352;2.166432,Crack 1;Crack 2;Crack 3,

@@ -1,0 +1,4 @@
+file,raw_y_col,raw_x_col,window_order,window_start_x,window_end_x,window_start_raw_idx,window_end_raw_idx,window_width,window_point_count,window_mean_y,window_peak_raw_idx,window_peak_raw_x,window_peak_raw_y,manual_label
+titan_4.csv, sensor2,timestamp,1,2496158.937192132,2499713.1917204172,194,331,3554.254528285004,138,2.7501231811594202,286,2498467.0,2.753582,Crack 1
+titan_4.csv, sensor2,timestamp,2,2500239.74794683,2503102.897427948,354,467,2863.149481118191,114,2.753542789473685,415,2501789.0,2.761742,Crack 2
+titan_4.csv, sensor2,timestamp,3,2504550.927050583,2507710.2644090583,522,644,3159.337358475197,123,2.7671758292682935,584,2506110.0,2.788408,Crack 3

@@ -1,0 +1,2 @@
+file,x_col,y_col,n_samples,noise_floor,noise_sigma,signal_amplitude,snr_linear,snr_db,peak_count,peak_indices,peak_snr_db_values,peak_labels,peak_height_threshold
+alum_8.csv,sensor1, sensor2,796,2.7620347264325327,0.000948104790678349,0.017321862068966354,18.269986861444846,25.2347647007409,3,443;580;709,15.073582;25.234765;30.856036,Crack 1;Crack 2;Crack 3,

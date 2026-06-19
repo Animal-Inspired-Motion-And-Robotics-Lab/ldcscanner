@@ -1,0 +1,4 @@
+file,raw_y_col,raw_x_col,window_order,window_start_x,window_end_x,window_start_raw_idx,window_end_raw_idx,window_width,window_point_count,window_mean_y,window_peak_raw_idx,window_peak_raw_x,window_peak_raw_y,manual_label
+alum_8.csv, sensor2,timestamp,1,5855807.318249434,5858045.15422216,411,496,2237.8359727254137,86,2.7649540581395353,443,5856613.0,2.767419,Crack 1
+alum_8.csv, sensor2,timestamp,2,5859143.22280505,5861242.062754625,541,624,2098.839949575253,84,2.7695142738095235,580,5860135.0,2.779258,Crack 2
+alum_8.csv, sensor2,timestamp,3,5862409.629349092,5864536.268503297,668,752,2126.6391542050987,85,2.776379941176471,709,5863456.0,2.795083,Crack 3
