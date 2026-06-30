@@ -22,6 +22,7 @@ import csv
 import os
 import time
 from collections import deque
+from datetime import datetime
 
 import numpy as np
 import serial
@@ -684,6 +685,15 @@ class ScannerState:
         self.ui_start_monotonic = time.monotonic()
         self.scrub_velocity = 1.0                # arrow-key time-scrub step (grows on hold)
 
+        # Latest plotted data window, cached so the Snapshot export reproduces
+        # exactly what is currently on screen (time, R_p, L + crack events).
+        self.snap_time = np.array([], dtype=float)
+        self.snap_rp = np.array([], dtype=float)
+        self.snap_l = np.array([], dtype=float)
+        self.snap_crack_times = np.array([], dtype=float)
+        self.snap_crack_mags = np.array([], dtype=float)
+        self.snap_crack_sizes = np.array([], dtype=float)
+
     def reset(self):
         """Clear buffered data so both plots restart from a clean state."""
         self.timestamps.clear()
@@ -1031,6 +1041,12 @@ baud_combo.setToolTip("Baud rate")
 connect_button = QtWidgets.QPushButton("Connect")
 connect_button.setMinimumWidth(100)
 
+# Snapshot: export all four plots as journal-quality PDFs (sits to the right of
+# the Connect / Start Replay button, which rescales to share the row).
+snapshot_button = QtWidgets.QPushButton("Snapshot")
+snapshot_button.setMinimumWidth(100)
+snapshot_button.setToolTip("Save all four plots as journal-quality PDFs")
+
 # Data-source mode: live serial vs. replaying a recorded CSV.
 mode_combo = QtWidgets.QComboBox()
 mode_combo.addItem("Live Serial", "serial")
@@ -1079,6 +1095,7 @@ connection_row2.addWidget(baud_combo)
 connection_row2.addWidget(speed_label)
 connection_row2.addWidget(speed_spin)
 connection_row2.addWidget(connect_button, 1)
+connection_row2.addWidget(snapshot_button)
 
 connection_status_label = QtWidgets.QLabel(serial_mgr.status_text)
 connection_status_label.setStyleSheet("font-size: 10px; color: #bbbbbb;")
@@ -1612,9 +1629,15 @@ def update():
         crack_y[1::2] = crack_vals_arr
         crack_curve.setData(crack_x, crack_y)
         crack_plot.setYRange(0.0, max(float(np.max(crack_vals_arr)) * 1.1, 1e-6), padding=0.0)
+        state.snap_crack_times = crack_times_arr
+        state.snap_crack_mags = crack_mags_arr
+        state.snap_crack_sizes = crack_sizes_arr
     else:
         crack_curve.setData([], [])
         crack_plot.setYRange(0.0, 1.0, padding=0.0)
+        state.snap_crack_times = np.array([], dtype=float)
+        state.snap_crack_mags = np.array([], dtype=float)
+        state.snap_crack_sizes = np.array([], dtype=float)
 
     lag = max(0, int(DISPLAY_LAG_POINTS))
     if lag > 0 and len(x_all) > lag:
@@ -1638,6 +1661,11 @@ def update():
     x_plot = x[xy_offset:]
     y1_plot = y1[xy_offset:]
     y2_plot = y2[xy_offset:]
+
+    # Cache the live plot window for the Snapshot export (time, R_p, L).
+    state.snap_time = x_plot
+    state.snap_rp = y1_plot
+    state.snap_l = y2_plot
 
     if len(x_plot) == 0:
         return
@@ -1709,6 +1737,169 @@ def update():
     else:
         for seg_curve in recent_segment_curves:
             seg_curve.setData([], [])
+
+
+# --- Snapshot export -------------------------------------------------------
+try:
+    _SNAPSHOT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _SNAPSHOT_SCRIPT_DIR = os.getcwd()
+SNAPSHOT_ROOT = os.path.join(_SNAPSHOT_SCRIPT_DIR, "Snapshots")
+
+# Axis labels shared by the live view and the exported figures.
+_SNAP_L_LABEL = "L (µH)"
+_SNAP_RP_LABEL = "R_p (Ω)"
+_SNAP_T_LABEL = "timestamp (ms)"
+
+
+def make_snapshot():
+    """Render the four live plots as journal-quality vector PDFs.
+
+    Reproduces exactly what is currently on screen — Phase Space (L vs R_p),
+    Time Trace (L vs t), the 3D surface trace, and the crack-event plot — using
+    matplotlib so the output is true vector with a clean white (publication)
+    style.  Files land in ``Snapshots/Snapshot <timestamp>/``.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: F401
+    except Exception as exc:
+        msg = f"Snapshot failed: matplotlib unavailable ({exc})"
+        connection_status_label.setText(msg)
+        print(msg)
+        return
+
+    time_arr = np.asarray(state.snap_time, dtype=float)
+    rp_arr = np.asarray(state.snap_rp, dtype=float)
+    l_arr = np.asarray(state.snap_l, dtype=float)
+    if time_arr.size == 0:
+        msg = "Snapshot skipped: no plotted data yet"
+        connection_status_label.setText(msg)
+        print(msg)
+        return
+
+    crack_times = np.asarray(state.snap_crack_times, dtype=float)
+    if state.crack_y_mode == "mag":
+        crack_vals = np.asarray(state.snap_crack_mags, dtype=float)
+        crack_label = "magnitude (au)"
+    else:
+        crack_vals = np.asarray(state.snap_crack_sizes, dtype=float)
+        crack_label = "crack_size"
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+    out_dir = os.path.join(SNAPSHOT_ROOT, f"Snapshot {stamp}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Publication style: white background, black text, serif labels.
+    style = {
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+        "font.size": 11,
+        "font.family": "serif",
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "lines.linewidth": 1.2,
+    }
+
+    def draw_phase(ax):
+        ax.plot(rp_arr, l_arr, color="#c0392b", linewidth=1.0)
+        ax.plot(rp_arr[-1], l_arr[-1], "o", color="black", markersize=4)
+        ax.set_xlabel(_SNAP_RP_LABEL)
+        ax.set_ylabel(_SNAP_L_LABEL)
+        ax.set_title("Phase Space")
+        ax.grid(True, alpha=0.3)
+
+    def draw_time(ax):
+        ax.plot(time_arr, l_arr, color="#c0392b", linewidth=1.0)
+        ax.set_xlabel(_SNAP_T_LABEL)
+        ax.set_ylabel(_SNAP_L_LABEL)
+        ax.set_title("Time Trace")
+        ax.grid(True, alpha=0.3)
+
+    def draw_crack(ax):
+        if crack_times.size:
+            ax.vlines(crack_times, 0.0, crack_vals, color="#e67e22", linewidth=1.0)
+            ax.set_ylim(0.0, max(float(np.max(crack_vals)) * 1.1, 1e-6))
+        ax.set_xlabel(_SNAP_T_LABEL)
+        ax.set_ylabel(crack_label)
+        ax.set_title("Crack Events")
+        ax.grid(True, alpha=0.3)
+
+    def draw_surface(ax):
+        surf = build_surface_data(time_arr, rp_arr, l_arr)
+        if surf is None:
+            ax.text2D(0.5, 0.5, "Not enough data", ha="center", va="center",
+                      transform=ax.transAxes)
+            return
+        _, faces, face_colors, _ = surf
+        n = time_arr.size
+        l_floor = float(np.min(l_arr))
+        # Physical-coordinate "curtain" with the same per-face coloring as the
+        # live GL view (face_colors order matches this vertex/face layout).
+        verts = np.empty((2 * n, 3), dtype=float)
+        verts[0::2, 0] = time_arr
+        verts[0::2, 1] = rp_arr
+        verts[0::2, 2] = l_floor
+        verts[1::2, 0] = time_arr
+        verts[1::2, 1] = rp_arr
+        verts[1::2, 2] = l_arr
+        tris = [verts[f] for f in faces]
+        ax.add_collection3d(Poly3DCollection(tris, facecolors=face_colors,
+                                             edgecolors="none"))
+        ax.plot(time_arr, rp_arr, l_arr, color="#e69b2a", linewidth=1.3)
+        ax.set_xlim(float(time_arr.min()), float(time_arr.max()))
+        ax.set_ylim(float(rp_arr.min()), float(rp_arr.max()))
+        ax.set_zlim(l_floor, max(float(np.max(l_arr)), l_floor + 1e-9))
+        ax.set_xlabel("Time")
+        ax.set_ylabel(_SNAP_RP_LABEL)
+        ax.set_zlabel(_SNAP_L_LABEL)
+        ax.set_title("3D Surface Trace")
+        ax.view_init(elev=22, azim=-35)
+
+    saved = []
+    try:
+        with plt.rc_context(style):
+            panels = [
+                ("phase_space.pdf", draw_phase, (5.0, 4.0), False),
+                ("time_trace.pdf", draw_time, (5.0, 4.0), False),
+                ("crack_events.pdf", draw_crack, (5.0, 2.0), False),
+                ("surface_3d.pdf", draw_surface, (5.5, 4.5), True),
+            ]
+            for name, draw, figsize, is_3d in panels:
+                fig = plt.figure(figsize=figsize)
+                ax = fig.add_subplot(1, 1, 1, projection="3d") if is_3d else fig.add_subplot(1, 1, 1)
+                draw(ax)
+                path = os.path.join(out_dir, name)
+                fig.savefig(path, bbox_inches="tight")
+                plt.close(fig)
+                saved.append(path)
+
+            # Combined 2x2 sheet for a single-figure submission.
+            fig = plt.figure(figsize=(11.0, 8.5))
+            draw_phase(fig.add_subplot(2, 2, 1))
+            draw_time(fig.add_subplot(2, 2, 2))
+            draw_surface(fig.add_subplot(2, 2, 3, projection="3d"))
+            draw_crack(fig.add_subplot(2, 2, 4))
+            fig.tight_layout()
+            path = os.path.join(out_dir, "combined.pdf")
+            fig.savefig(path, bbox_inches="tight")
+            plt.close(fig)
+            saved.append(path)
+    except Exception as exc:
+        msg = f"Snapshot failed: {exc}"
+        connection_status_label.setText(msg)
+        print(msg)
+        return
+
+    msg = f"Snapshot saved ({len(saved)} PDFs): {out_dir}"
+    connection_status_label.setText(msg)
+    print(msg)
+
+
+snapshot_button.clicked.connect(make_snapshot)
 
 
 timer = QtCore.QTimer()
