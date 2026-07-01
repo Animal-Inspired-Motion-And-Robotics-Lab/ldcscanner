@@ -1,0 +1,218 @@
+========================================================================
+SCANIMATOR V4 (snr-tools branch) — CSV -> PER-CRACK SNR PIPELINE
+DESCRIPTION FOR FLOWCHART IMAGE GENERATION
+========================================================================
+
+--------------------------------------------------------------------
+INSTRUCTIONS FOR THE IMAGE GENERATOR (read first)
+--------------------------------------------------------------------
+Produce a clean, top-to-bottom flowchart that shows how Scanimator V4 turns a
+recorded scan CSV into per-crack signal-to-noise-ratio (SNR) estimates.
+
+Please:
+- Draw ONE main vertical "spine" that starts at the input CSV and ends at the
+  per-crack SNR output. This spine is the story; keep it visually dominant.
+- Show the human-in-the-loop steps (file picker, manual crack labeling) as
+  clearly marked interactive/manual nodes (e.g. a different color or a person
+  icon).
+- Draw the on-disk caches and the run-output folder as cylinders/database
+  shapes off to the side of the spine.
+- Draw the animation/3D-plot outputs as a secondary branch off to the side
+  (they are extra deliverables, NOT part of the SNR computation).
+- Label the arrows with the data that flows along them (e.g. "DataFrames",
+  "manual crack windows", "per-window peaks").
+- Use the explicit NODE and EDGE lists near the bottom as the source of truth
+  for boxes and arrows; the prose explains the semantics.
+- Optionally include the "SNR FORMULA" box as a callout attached to the SNR
+  analysis node.
+
+--------------------------------------------------------------------
+1. WHAT THIS PIPELINE DOES
+--------------------------------------------------------------------
+Scanimator V4 is an OFFLINE analysis script on the "snr-tools" branch. It takes
+one or more CSV scans that were recorded by the live tool (LDC SCANNER V5/V6 on
+the dual-streams branch), lets the user mark where the cracks are, and then
+quantifies how strongly each crack stands out from the background noise as an
+SNR value (both linear and in dB) — reported per crack and summarized per file.
+
+Entry point: `main()` in "Scanimator V4.py". It is a linear pipeline that calls
+into five helper modules: config, io_utils, labeling, signal_processing,
+visualization.
+
+--------------------------------------------------------------------
+2. THE INPUT CSV (produced by LDC SCANNER V5/V6)
+--------------------------------------------------------------------
+Each CSV row is one telemetry sample. Header columns:
+    timestamp_computer, timestamp, sensor1, sensor2,
+    mag, width, crack_x, crack_size, serial out, response
+
+Scanimator V4 uses only three of these (column names from config.py):
+    TIME_COL = "timestamp"     -> time axis (animations / 3D)
+    X_COL    = "sensor1"       -> R_p (resistance)   -> used for window x-bounds
+    Y_COL    = " sensor2"      -> L (inductance)     -> THE crack signal that
+                                                        SNR is computed on
+(The leading space in " sensor2" is intentional; the code is whitespace-tolerant
+when resolving column names.)
+
+--------------------------------------------------------------------
+3. PIPELINE STAGES (in execution order)
+--------------------------------------------------------------------
+
+STAGE 1 — Select CSV files  [INTERACTIVE]
+  Fn:  io_utils.select_csv_files_via_gui()
+  A tkinter file dialog lets the user pick one or more recorded CSV scans.
+  Out: list of file paths.
+
+STAGE 2 — Load & set up
+  Fn:  io_utils.load_csv_files()            -> {filename: pandas.DataFrame}
+       io_utils.build_source_path_lookup()  -> {filename: source path}  (for cache keys)
+       io_utils.create_run_output_dir()     -> outputs/run_<timestamp>/  (never overwritten)
+  Out: DataFrames in memory + a fresh timestamped output folder.
+
+STAGE 3 — Interactive raw 3D transform preview  [INTERACTIVE, SIDE-PATH]
+  Fn:  visualization.create_interactive_raw_3d_transform_preview()
+  The user can preview/adjust a rotation angle + smoothing on the raw signal;
+  chosen rotation is remembered in rotation_cache/. This mainly feeds the
+  later animations. NOTE: the SNR computation itself uses the RAW sensor1/
+  sensor2 columns, so this stage is not required for the per-crack SNR result.
+
+STAGE 4 — Manual crack-window labeling  [INTERACTIVE — the "ground truth"]
+  Fn:  labeling.run_manual_raw_peak_labeling()
+  For each file, the raw L (sensor2) signal is plotted. The user DRAGS spans and
+  presses keys to mark cracks:
+      1 / 2 / 3  -> label the span as Crack 1 / Crack 2 / Crack 3
+      0          -> clear windows overlapping the span
+      x          -> trim (delete) the datapoints in the span (edits the DataFrame
+                    used downstream)
+      Enter      -> finish this file
+  Windows are cached per file in window_label_cache/ (keyed by a content
+  fingerprint), so re-runs skip re-labeling unless the CSV changes.
+  Out: labels_df (one row per labeled window) + manual_window_labels.csv +
+       per-file selection PNGs in the run-output folder.
+  Guard: if no crack windows are labeled, the pipeline stops (ground-truth SNR
+  needs labels).
+
+STAGE 5 — SNR analysis (ground-truth mode)  [THE CORE COMPUTATION]
+  Fn:  signal_processing.analyze_snr(..., ground_truth_only=True,
+                                     require_manual_windows=True)
+        -> calls compute_xy_crack_snr_metrics() per file.
+  For each file:
+    5a. Resolve & clean columns: x = sensor1 (R_p), y = sensor2 (L); coerce to
+        numeric, drop non-finite rows, keep original row indices.
+    5b. Map each manual crack window to a contiguous range of sample indices
+        (using saved raw-row indices, or x-value bounds as fallback).
+    5c. Global noise: build a mask of all crack-window samples; the NOISE SIGMA
+        is the standard deviation of every NON-crack sample in the file.
+    5d. Per crack window:
+          peak      = maximum L value inside the window
+          baseline  = mean L of the neighboring non-crack samples on each side
+                      (between this window and the adjacent windows)
+          signal    = peak - baseline
+          SNR_lin   = signal / noise_sigma
+          SNR_dB    = 20 * log10(SNR_lin)
+        -> one per-crack record (this is the target output).
+    5e. File-level summary: signal_amplitude = median of the per-window signals;
+          file SNR_lin = signal_amplitude / noise_sigma;  file SNR_dB = 20*log10.
+  Out: (snr_df = per-file summary, per_crack_df = PER-CRACK estimates).
+
+STAGE 6 — Write SNR results  [PRIMARY OUTPUT — pipeline endpoint]
+  snr_per_crack_<timestamp>.csv   <- PER-CRACK SNR ESTIMATES (the goal)
+      columns include: file, manual_label (Crack 1/2/3), peak_x, peak_y,
+      noise_floor, noise_sigma, peak_signal_amplitude, peak_snr_linear, peak_snr_db
+  snr_analysis_<timestamp>.csv    <- per-file summary (snr_db, snr_linear,
+      signal_amplitude, noise_sigma, peak_count, ...)
+  Fn:  visualization.create_snr_visualizations() -> static SNR charts (PNG/PDF).
+
+STAGE 7 — Animations & 3D plots  [SIDE OUTPUTS, not on the SNR spine]
+  Fns: visualization.create_overlay_animation(),
+       create_stacked_animation(), create_stacked_baseline_animation(),
+       create_3d_overlay_animation(), create_3d_contour_plots()
+  Produce GIFs / 3D contour figures (optionally colored by the SNR results).
+  All land in outputs/run_<timestamp>/.
+
+--------------------------------------------------------------------
+SNR FORMULA (callout for the STAGE 5 node)
+--------------------------------------------------------------------
+  For each labeled crack window i:
+      peak_i      = max(L) inside window i
+      baseline_i  = mean(L) of the non-crack samples bordering window i
+      signal_i    = peak_i - baseline_i
+      SNR_i(lin)  = signal_i / sigma_noise
+      SNR_i(dB)   = 20 * log10( signal_i / sigma_noise )
+  where
+      sigma_noise = std( all L samples NOT inside any crack window )   [per file]
+  File summary:
+      SNR_file(lin) = median_i(signal_i) / sigma_noise
+
+====================================================================
+NODE LIST (use these as flowchart boxes)
+====================================================================
+# Input
+IN1  Recorded scan CSV(s)  (from LDC SCANNER V5/V6, dual-streams branch)
+# Main-spine process nodes
+S1   Select CSV files  [tkinter picker, INTERACTIVE]
+S2   Load CSVs -> DataFrames  (+ create run-output folder)
+S3   Interactive rotation/smoothing preview  [INTERACTIVE, optional to SNR]
+S4   Manual crack-window labeling  [INTERACTIVE, ground truth]
+S5   analyze_snr() ground-truth SNR computation
+S6   Write per-crack + per-file SNR CSVs
+# Caches / stores (side, cylinder shapes)
+C1   rotation_cache/            (saved rotation angle + smoothing)
+C2   window_label_cache/        (saved manual crack windows, per file)
+C3   outputs/run_<timestamp>/   (all outputs for this run)
+# Data artifacts (can be small ovals on the spine)
+D1   DataFrames {filename -> table}
+D2   labels_df  (manual crack windows)
+D3   snr_df + per_crack_df  (in memory)
+# Primary output (endpoint)
+OUT1 snr_per_crack_<ts>.csv   <-- PER-CRACK SNR ESTIMATES (highlight as the goal)
+OUT2 snr_analysis_<ts>.csv    (per-file SNR summary)
+OUT3 SNR charts (PNG/PDF)
+# Side outputs
+OUT4 Animations (GIFs) + 3D contour plots
+# Helper modules (optional legend box)
+M    config.py / io_utils.py / labeling.py / signal_processing.py / visualization.py
+
+====================================================================
+EDGE LIST  (format:  FROM -> TO : label)   * = main spine
+====================================================================
+IN1 -> S1  : user picks files                              *
+S1  -> S2  : file paths                                    *
+S2  -> D1  : pandas.read_csv per file
+S2  -> C3  : create outputs/run_<timestamp>/
+D1  -> S3  : DataFrames (raw sensor1/sensor2)
+S3  -> C1  : save/reuse rotation + smoothing
+D1  -> S4  : raw L (sensor2) signal per file               *
+S4  -> C2  : cache manual windows (per file)
+C2  -> S4  : reuse cached windows on re-run
+S4  -> D2  : labels_df (Crack 1/2/3 windows)               *
+S4  -> C3  : manual_window_labels.csv + selection PNGs
+D2  -> S5  : manual crack windows                          *
+D1  -> S5  : cleaned sensor1 (R_p) + sensor2 (L)           *
+S5  -> D3  : snr_df + per_crack_df                         *
+D3  -> S6  : per-crack + per-file records                  *
+S6  -> OUT1: snr_per_crack_<ts>.csv  (PER-CRACK SNR)       *  [ENDPOINT]
+S6  -> OUT2: snr_analysis_<ts>.csv
+S6  -> OUT3: SNR charts
+D3 -> OUT4 : animations + 3D plots colored by SNR   (side branch)
+D1 -> OUT4 : raw signals drive the animations       (side branch)
+OUT1 -> C3 : (all outputs written under the run folder)
+OUT2 -> C3
+OUT3 -> C3
+OUT4 -> C3
+
+====================================================================
+SUGGESTED LAYOUT
+====================================================================
+- Vertical spine (top to bottom):
+      IN1 -> S1 -> S2 -> S4 -> S5 -> S6 -> OUT1
+  Draw OUT1 ("per-crack SNR estimates") as the emphasized final node.
+- Put S3 (rotation preview) as a small side step hanging off S2/D1, clearly
+  marked "optional for SNR / feeds animations".
+- Put caches C1, C2 and the run folder C3 as cylinders to the right, with
+  dashed arrows to/from the stages that read/write them.
+- Put OUT2, OUT3 as smaller boxes branching off S6; put OUT4 (animations/3D)
+  as a separate side branch fed by D3 + D1.
+- Mark S1, S3, S4 as human-in-the-loop (interactive) steps.
+
+(End of description — accurate to Scanimator V4 on the snr-tools branch.)
