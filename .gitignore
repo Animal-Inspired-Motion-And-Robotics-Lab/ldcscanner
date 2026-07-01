@@ -1,0 +1,24 @@
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environment ---
+.venv/
+venv/
+
+# --- PyInstaller build output (the .spec files ARE tracked as build source) ---
+build/
+dist/
+
+# --- Live-scanner generated output ---
+Snapshots/
+
+# --- Notebook / analysis generated run outputs ---
+# Timestamped run folders are regenerated whenever the analysis is re-run.
+# (Named experiment output folders and outputs/reports/ stay tracked.)
+outputs/run_*/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db

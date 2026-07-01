@@ -1,0 +1,371 @@
+========================================================================
+LDC SCANNER V6 — MODULE & DATA-FLOW DESCRIPTION FOR FLOWCHART GENERATION
+========================================================================
+
+--------------------------------------------------------------------
+INSTRUCTIONS FOR CHATGPT (read first)
+--------------------------------------------------------------------
+Using the description below, produce a clear flowchart that shows how the
+modules of the refactored "LDC SCANNER V6" application work together.
+
+Please:
+- Draw the `scanner/` package modules and the entry file `LDC SCANNER V6.py`
+  as distinct grouped regions (subgraphs / swimlanes).
+- Show (a) the static module dependency graph AND (b) the runtime live-data
+  pipeline. If one diagram is too dense, produce 3 linked diagrams:
+    1) Module dependency graph
+    2) Live data pipeline (serial/CSV -> buffers -> update() -> plots)
+    3) Data-source state machine (Live Serial vs CSV Replay) + Snapshot export
+- Use the explicit NODE and EDGE lists near the bottom as the source of truth
+  for arrows; the prose sections explain the semantics.
+- Prefer Mermaid syntax (graph TD / flowchart LR / stateDiagram-v2), but any
+  clean flowchart format is fine.
+- Keep node labels short (symbol name + one phrase); put detail in the layout,
+  not inside the boxes.
+
+--------------------------------------------------------------------
+1. WHAT THE PROGRAM DOES
+--------------------------------------------------------------------
+LDC SCANNER V6 is a real-time PyQt / pyqtgraph desktop GUI for an eddy-current
+scanner robot. It reads sensor telemetry over a serial port (or replays a
+recorded CSV as if it were live), streams it into three live plots, optionally
+logs every sample to CSV, offers a two-way serial command console, and can
+export the plots as journal-quality PDFs ("Snapshot").
+
+The three live plots:
+  - A 3D "surface curtain" of the trajectory (Time vs R_p vs L).
+  - An upper-right plot that toggles between Phase Space (L vs R_p) and
+    Time Trace (L vs t).
+  - A crack-event plot (event magnitude or crack_size vs time).
+
+Sensor naming convention used everywhere: sensor1 = R_p (resistance),
+sensor2 = L (inductance).
+
+--------------------------------------------------------------------
+2. ARCHITECTURE IN ONE SENTENCE
+--------------------------------------------------------------------
+The Qt-free backend lives in the `scanner/` Python package (pure logic, data
+classes, I/O sources, PDF export); the single runnable entry file
+`LDC SCANNER V6.py` builds the Qt UI, owns the 50 ms redraw loop `update()`,
+and wires all event handlers. You launch `LDC SCANNER V6.py` directly from the
+repo root so that `import scanner` resolves.
+
+--------------------------------------------------------------------
+3. FILE / MODULE INVENTORY
+--------------------------------------------------------------------
+Each entry: MODULE — role — key symbols — what it imports.
+
+[A] scanner/config.py
+    Role: single place for all runtime constants + a line-width helper.
+    Key symbols: SERIAL_PORT, BAUDRATE, BAUD_RATES, CSV_FILE,
+      REPLAY_DEFAULT_SPEED, REPLAY_SCRUB_ACCEL, REPLAY_SCRUB_MAX_STEP,
+      MAX_POINTS, DISPLAY_LAG_POINTS, RECENT_FADE_POINTS,
+      AVERAGE_UPDATE_INTERVAL_SEC, RP_ZERO_EPSILON, RP_ZERO_FALLBACK_WINDOW,
+      SERIAL_RESPONSE_MAX_LINES, SERIAL_RESPONSE_BOX_MAX_HEIGHT,
+      *_LINE_WIDTH_PERCENT, scale_line_width(); exports __all__.
+    Imports: nothing (standard library only).
+    NOTE: This is separate from the repo-root config.py (which configures the
+      offline SNR/Scanimator analysis pipeline). Do not conflate them.
+
+[B] scanner/parsing.py
+    Role: pure functions that turn a received telemetry line into numbers.
+    Key symbols: parse_keyed_fields(), parse_serial_line(),
+      extract_reject_reason(), parse_crack_event().
+    Imports: numpy.
+
+[C] scanner/surface.py
+    Role: pure geometry for the 3D ribbon "curtain" mesh + an R_p usability test.
+    Key symbols: has_usable_rp(), build_surface_data() (returns
+      vertices, faces, face_colors, line_pos).
+    Imports: numpy, scanner.config (RP_ZERO_EPSILON, RP_ZERO_FALLBACK_WINDOW).
+
+[D] scanner/widgets.py
+    Role: the one custom pyqtgraph widget.
+    Key symbols: ToggleAxisItem (a pg.AxisItem that emits `toggled` on click).
+    Imports: pyqtgraph.
+
+[E] scanner/csv_logger.py
+    Role: owns the append-only output CSV file.
+    Key symbols: CsvLogger (HEADER, set_output_file(), write_sample(), close()).
+    Imports: csv, os, time.
+
+[F] scanner/data_sources.py
+    Role: the two interchangeable data sources behind the read loop.
+    Key symbols:
+      - SerialManager: live pyserial port; supports_commands = True.
+      - CsvReplaySource: replays a recorded CSV as if live;
+        supports_commands = False; adds time-scrub methods (position, total,
+        window_lines(), set_position()).
+    Both expose the SAME minimal interface: is_connected, in_waiting,
+      readline(), reset_input_buffer(), write(), disconnect(), close(), and an
+      optional on_change callback.
+    Imports: serial, serial.tools.list_ports, os, csv, time, collections.deque,
+      scanner.config (MAX_POINTS, REPLAY_DEFAULT_SPEED).
+
+[G] scanner/state.py
+    Role: THE central hub — all mutable runtime state + sample ingestion.
+    Key symbol: ScannerState. Holds:
+      - live ring buffers: timestamps, sensor1 (R_p), sensor2 (L),
+        crack_times, crack_mags, crack_sizes (all deque, maxlen=MAX_POINTS).
+      - control flags: paused, write_to_file_enabled.
+      - readout text + latest non-zero values.
+      - view flags: right_x_mode ("RP"/"TIME"), right_plot_auto_time_fallback,
+        crack_y_mode ("mag"/"crack_size"), scrub_velocity, xy_start_index.
+      - snapshot cache: snap_time, snap_rp, snap_l, snap_crack_times,
+        snap_crack_mags, snap_crack_sizes (the exact currently-plotted window).
+      Methods: reset(), ingest_sample(), ingest_crack_event(),
+        stage_command_exchange(), consume_pending_command_exchange().
+    Imports: numpy, time, collections.deque, scanner.config
+      (MAX_POINTS, RECENT_FADE_POINTS), scanner.parsing (parse_crack_event).
+
+[H] scanner/snapshot.py
+    Role: render the four live plots as journal-quality vector PDFs.
+    Key symbol: make_snapshot(state, out_root, on_status=print) -> list[str].
+      Reads state.snap_* caches, re-renders with matplotlib (clean white
+      publication style), writes phase_space.pdf, time_trace.pdf,
+      surface_3d.pdf, crack_events.pdf, and a 2x2 combined.pdf into
+      <out_root>/Snapshot <timestamp>/. Reports progress via on_status.
+    Imports: os, datetime, numpy, matplotlib (lazy, Agg backend),
+      scanner.surface (build_surface_data).
+
+[I] LDC SCANNER V6.py  (the runnable entry file; NOT part of the package)
+    Role: Qt UI construction (Section 8), event handlers + the update() loop
+      (Section 9), and runtime object creation (Section 7).
+    Imports from the package: `from scanner.config import *`, and explicit
+      imports of parse_serial_line, extract_reject_reason, has_usable_rp,
+      build_surface_data, ToggleAxisItem, CsvLogger, SerialManager,
+      CsvReplaySource, ScannerState, make_snapshot.
+    Key functions defined here (all operate on module-level widgets + `state`):
+      update() (the 50 ms timer callback), read_serial(), consume_serial_line(),
+      keyPressEvent(), keyReleaseEvent(), scrub_replay(), rebuild_from_replay(),
+      send_serial_command(), append_incoming_line(), refresh_ports(),
+      current_mode(), replay_active(), browse_csv(), start_replay(),
+      stop_replay(), toggle_connection(), on_mode_changed(),
+      set_connection_ui_state(), set_right_x_mode(), toggle_right_x_mode(),
+      set_crack_y_mode(), toggle_crack_y_mode(), write_toggle_changed(),
+      apply_csv_filename(), take_snapshot(), _snapshot_status(),
+      close_resources().
+
+--------------------------------------------------------------------
+4. STATIC MODULE DEPENDENCY GRAPH (import-time; no cycles)
+--------------------------------------------------------------------
+config  -> (imported by) surface, data_sources, state, and entry file
+parsing -> (imported by) state, entry file
+surface -> imports config; imported by snapshot, entry file
+widgets -> imported by entry file
+csv_logger  -> imported by entry file
+data_sources-> imports config; imported by entry file
+state   -> imports config, parsing; imported by entry file
+snapshot-> imports surface (-> config); imported by entry file
+entry file (LDC SCANNER V6.py) -> imports config, parsing, surface, widgets,
+    csv_logger, data_sources, state, snapshot
+
+Dependency direction is strictly: config is the leaf; entry file is the root.
+
+--------------------------------------------------------------------
+5. RUNTIME OBJECTS (created once in Section 7 of the entry file)
+--------------------------------------------------------------------
+serial_mgr    = SerialManager(BAUDRATE)     # the live serial source (persistent)
+csv_logger    = CsvLogger(CSV_FILE)         # output CSV writer
+state         = ScannerState()              # the central state hub
+replay_source = None                        # a CsvReplaySource once a replay starts
+source        = serial_mgr                  # POINTER to the ACTIVE data source
+
+`source` is the key indirection: the read loop always drains `source`, which is
+reassigned between `serial_mgr` and the active `replay_source` when the user
+switches mode. Both sources' on_change callback is set to
+set_connection_ui_state.
+
+--------------------------------------------------------------------
+6. LIVE DATA PIPELINE (the per-frame path; happens every 50 ms)
+--------------------------------------------------------------------
+A QTimer fires update() every 50 ms. Ordered flow:
+
+(1) Hardware/CSV -> source (serial_mgr OR replay_source)
+(2) update() calls read_serial()
+(3) read_serial(): if not state.paused, while source.in_waiting: read
+    source.readline() and pass each line to consume_serial_line()
+(4) consume_serial_line(line):
+      - append raw text to state.incoming_history (+ append_incoming_line UI)
+      - extract_reject_reason(line) -> state.reject_reason
+      - state.ingest_crack_event(line)   [uses parse_crack_event]
+      - parse_serial_line(line) -> (t, rp, l, mag, width, crack_x, crack_size)
+      - state.ingest_sample(...)
+(5) state.ingest_sample():
+      - append t -> timestamps, rp -> sensor1, l -> sensor2
+      - if write_to_file_enabled: csv_logger.write_sample(...) -> CSV file
+      - update latest non-zero mag/width/crack_size + readout_text
+(6) Back in update(): read buffers into numpy arrays (x_all, y1_all=R_p,
+    y2_all=L); compute crack arrays; apply DISPLAY_LAG_POINTS trimming.
+(7) update() caches the visible window into
+      state.snap_time / snap_rp / snap_l / snap_crack_* (for Snapshot).
+(8) update() redraws the three views:
+      - 3D surface: build_surface_data(time, R_p, L) -> mesh + trace + head
+      - upper-right plot: choose Phase Space (L vs R_p) if has_usable_rp(R_p),
+        else Time Trace (L vs t); also honors state.right_x_mode; draws the
+        red->white recent-tail gradient (length RECENT_FADE_POINTS).
+      - crack plot: vertical stems of mag or crack_size vs time; x-axis links to
+        the upper plot when the upper plot is in a time x-mode.
+      - update readout_label + average_label text.
+
+--------------------------------------------------------------------
+7. DATA-SOURCE ABSTRACTION & MODE SWITCHING (Live Serial vs CSV Replay)
+--------------------------------------------------------------------
+- current_mode() reads the mode combo ("serial" | "csv").
+- Live Serial: toggle_connection() calls serial_mgr.connect()/disconnect();
+  source = serial_mgr.
+- CSV Replay: start_replay() builds CsvReplaySource(path, speed), sets
+  source = replay_source, calls state.reset(), replay_source.start();
+  stop_replay() disconnects it.
+- on_mode_changed() disconnects the other source and repoints `source`.
+- Any source hardware error auto-disconnects and fires on_change ->
+  set_connection_ui_state() (updates widget enabled/visibility + status label).
+
+Replay-only TIME SCRUBBING (Left/Right arrow keys):
+  keyPressEvent -> scrub_replay(direction, accelerating):
+    - accelerates step by REPLAY_SCRUB_ACCEL up to REPLAY_SCRUB_MAX_STEP
+    - source.set_position(new_index)
+    - rebuild_from_replay(): state.reset(); re-ingest source.window_lines()
+      via consume_serial_line(..., log=False, show_incoming=False); the next
+      update() repaints from the rebuilt buffers.
+  keyReleaseEvent resets scrub_velocity.
+
+--------------------------------------------------------------------
+8. SNAPSHOT EXPORT FLOW
+--------------------------------------------------------------------
+Snapshot button.clicked -> take_snapshot() (entry file)
+  -> make_snapshot(state, SNAPSHOT_ROOT, on_status=_snapshot_status)
+       - reads state.snap_time / snap_rp / snap_l / snap_crack_*
+       - build_surface_data(...) for the 3D panel
+       - matplotlib renders 5 PDFs into Snapshots/Snapshot <timestamp>/:
+           phase_space.pdf, time_trace.pdf, surface_3d.pdf, crack_events.pdf,
+           combined.pdf
+       - returns list of paths; _snapshot_status() writes progress to
+         connection_status_label + stdout.
+
+--------------------------------------------------------------------
+9. USER-INTERACTION HANDLER CLUSTERS (entry file) — what each touches
+--------------------------------------------------------------------
+- Connection controls: refresh_ports, current_mode, replay_active, browse_csv,
+  start_replay, stop_replay, toggle_connection, on_mode_changed,
+  set_connection_ui_state  <-> serial_mgr / replay_source / source + many
+  connection widgets + connection_status_label.
+- Serial console: send_serial_command (source.write + collect responses),
+  append_incoming_line  <-> serial_command_input / serial_response_box /
+  incoming_line_box + state.
+- CSV write: write_toggle_changed (-> state.write_to_file_enabled),
+  apply_csv_filename (-> csv_logger.set_output_file).
+- Axis toggles: set_right_x_mode/toggle_right_x_mode (plot_xy title/labels +
+  state.right_x_mode) via ToggleAxisItem on the x-axis;
+  set_crack_y_mode/toggle_crack_y_mode (crack_plot label + state.crack_y_mode)
+  via ToggleAxisItem on the crack y-axis.
+- Keyboard: keyPressEvent (Space=reset all plots+state, P=pause, F=toggle CSV
+  write, 1/2/3=3D view presets, Left/Right=scrub), keyReleaseEvent.
+- Lifecycle: close_resources() on app quit -> csv_logger.close(),
+  serial_mgr.close(), replay_source.close().
+
+====================================================================
+10. EXPLICIT NODE LIST (use these as flowchart boxes)
+====================================================================
+# Package modules
+N1  scanner/config.py
+N2  scanner/parsing.py
+N3  scanner/surface.py
+N4  scanner/widgets.py (ToggleAxisItem)
+N5  scanner/csv_logger.py (CsvLogger)
+N6  scanner/data_sources.py (SerialManager, CsvReplaySource)
+N7  scanner/state.py (ScannerState)
+N8  scanner/snapshot.py (make_snapshot)
+# Entry file
+N9  LDC SCANNER V6.py (Qt UI + update() loop + handlers)
+# Runtime objects / data
+R1  serial_mgr (SerialManager)
+R2  replay_source (CsvReplaySource)
+R3  source (active-source pointer)
+R4  state (ScannerState buffers + snap_* cache)
+R5  csv_logger (CsvLogger)
+# External
+X1  Scanner hardware / serial port
+X2  Recorded CSV file
+X3  Output CSV file
+X4  Snapshot PDFs
+# Plots
+P1  3D surface view
+P2  upper-right plot (Phase Space / Time Trace)
+P3  crack-event plot
+
+====================================================================
+11. EXPLICIT EDGE LIST  (format:  FROM -> TO : label)
+====================================================================
+# --- static import dependencies ---
+N3 -> N1 : imports constants
+N6 -> N1 : imports constants
+N7 -> N1 : imports constants
+N7 -> N2 : uses parse_crack_event
+N8 -> N3 : uses build_surface_data
+N9 -> N1 : from config import *
+N9 -> N2 : parse_serial_line, extract_reject_reason
+N9 -> N3 : has_usable_rp, build_surface_data
+N9 -> N4 : ToggleAxisItem
+N9 -> N5 : CsvLogger
+N9 -> N6 : SerialManager, CsvReplaySource
+N9 -> N7 : ScannerState
+N9 -> N8 : make_snapshot
+
+# --- runtime object creation (in entry file Section 7) ---
+N9 -> R1 : creates serial_mgr = SerialManager(BAUDRATE)
+N9 -> R2 : creates replay_source (when a CSV replay starts)
+N9 -> R4 : creates state = ScannerState()
+N9 -> R5 : creates csv_logger = CsvLogger(CSV_FILE)
+R3 -> R1 : points to (Live Serial mode)
+R3 -> R2 : points to (CSV Replay mode)
+
+# --- live data pipeline ---
+X1 -> R1 : telemetry bytes
+X2 -> R2 : recorded rows replayed as telemetry
+R1 -> R3 : active source
+R2 -> R3 : active source
+R3 -> N9 : read_serial() drains source.readline()
+N9 -> N2 : consume_serial_line parses each line
+N2 -> R4 : ingest_sample / ingest_crack_event fill buffers
+R4 -> R5 : ingest_sample -> write_sample (if write enabled)
+R5 -> X3 : append row to output CSV
+R4 -> N9 : update() reads buffers
+N9 -> N3 : build_surface_data(time, R_p, L)
+N3 -> P1 : mesh + trace -> 3D surface
+N9 -> P2 : L vs R_p or L vs t (choice via has_usable_rp / right_x_mode)
+N9 -> P3 : crack stems (mag or crack_size)
+N9 -> R4 : cache visible window into state.snap_*
+
+# --- snapshot export ---
+N9 -> N8 : take_snapshot() -> make_snapshot(state, root, on_status)
+R4 -> N8 : reads state.snap_* caches
+N8 -> N3 : build_surface_data for 3D panel
+N8 -> X4 : writes 5 PDFs (phase/time/surface/crack/combined)
+N8 -> N9 : on_status -> connection_status_label + stdout
+
+# --- mode switching & scrubbing ---
+N9 -> R2 : start_replay() builds + starts CsvReplaySource
+N9 -> R3 : on_mode_changed()/start_replay() repoint source
+R1 -> N9 : on_change callback -> set_connection_ui_state
+R2 -> N9 : on_change callback -> set_connection_ui_state
+N9 -> R2 : scrub_replay -> set_position; rebuild_from_replay re-ingests window
+
+# --- lifecycle ---
+N9 -> R5 : close_resources() -> csv_logger.close()
+N9 -> R1 : close_resources() -> serial_mgr.close()
+N9 -> R2 : close_resources() -> replay_source.close()
+
+====================================================================
+12. SUGGESTED FLOWCHART GROUPINGS (swimlanes / subgraphs)
+====================================================================
+- GROUP "scanner/ package (Qt-free backend)": N1 N2 N3 N4 N5 N6 N7 N8
+- GROUP "Entry file: LDC SCANNER V6.py (Qt UI + loop)": N9
+- GROUP "Runtime singletons": R1 R2 R3 R4 R5
+- GROUP "External I/O": X1 X2 X3 X4
+- GROUP "Live plots": P1 P2 P3
+Highlight `state` (R4) as the central hub and `source` (R3) as the
+Live-vs-Replay switch. Mark the update() 50 ms timer loop as the beating heart
+that connects buffers to plots.
+
+(End of description — everything above is accurate to the refactored codebase.)
