@@ -43,6 +43,8 @@ MAX_POINTS = 5000                   # ring-buffer length for every sample deque
 DISPLAY_LAG_POINTS = 1              # skip newest N points in plots to reduce right-edge jitter
 RECENT_FADE_POINTS = 100            # length of the highlighted red->white trajectory tail
 AVERAGE_UPDATE_INTERVAL_SEC = 5.0
+SURFACE_UPDATE_INTERVAL_SEC = 0.1   # min seconds between 3D mesh rebuilds (~10 Hz); the
+                                    # cheap 2D plots still refresh every read tick (~20 Hz)
 RP_ZERO_EPSILON = 1e-12             # R_p span at/below this counts as "flat/zero"
 RP_ZERO_FALLBACK_WINDOW = 100       # samples inspected when deciding R_p is flat
 SERIAL_RESPONSE_MAX_LINES = 20
@@ -68,6 +70,7 @@ __all__ = [
     "DISPLAY_LAG_POINTS",
     "RECENT_FADE_POINTS",
     "AVERAGE_UPDATE_INTERVAL_SEC",
+    "SURFACE_UPDATE_INTERVAL_SEC",
     "RP_ZERO_EPSILON",
     "RP_ZERO_FALLBACK_WINDOW",
     "SERIAL_RESPONSE_MAX_LINES",

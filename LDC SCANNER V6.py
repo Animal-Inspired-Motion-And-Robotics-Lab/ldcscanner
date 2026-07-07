@@ -238,17 +238,54 @@ def toggle_right_x_mode():
 bottom_axis.toggled.connect(toggle_right_x_mode)
 
 initial_xy_view_state = plot_xy.getViewBox().getState(copy=True)
-xy_curve = plot_xy.plot(pen=pg.mkPen('r', width=scale_line_width(1.0, RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT)))
+
+# Pens are rebuilt-free: created once here and reused every frame (constructing
+# pg.mkPen per frame — once for the main curve and up to RECENT_FADE_POINTS more
+# for the fade tail — was a needless per-frame cost that grew the redraw time).
+XY_MAIN_PEN = pg.mkPen('r', width=scale_line_width(1.0, RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT))
+CRACK_PEN = pg.mkPen((255, 190, 140, 230), width=scale_line_width(1.0, CRACK_PLOT_LINE_WIDTH_PERCENT))
+RECENT_TAIL_WIDTH = scale_line_width(3.0, RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT)
+
+# Downsampling / clip-to-view thin the ~5000-point main curve to what's visible,
+# a big redraw saving — but pyqtgraph's peak downsampling and clip both assume x
+# increases monotonically.  That holds in Time mode (x = timestamp) but NOT in
+# phase-space mode (x = R_p weaves back and forth), where it produces sawtooth
+# artifacts.  So update() toggles these per-frame to match the current x-axis.
+xy_curve = plot_xy.plot(pen=XY_MAIN_PEN)
+_xy_fast_draw = None                    # last-applied state, to avoid redundant toggles
+
+
+def set_xy_fast_draw(enabled):
+    """Enable clip/downsample on the main curve only when x is monotonic time."""
+    global _xy_fast_draw
+    if enabled == _xy_fast_draw:
+        return
+    _xy_fast_draw = enabled
+    xy_curve.setClipToView(enabled)
+    xy_curve.setDownsampling(auto=enabled, method='peak')
+
+# Cache the red->white gradient pens per tail length.  The fade shade for
+# segment i depends only on how many segments are drawn, so once the tail is at
+# full length (the steady state) this builds the pen list exactly once.
+_recent_pen_cache = {}
+
+
+def _recent_tail_pens(seg_count):
+    """Return the cached list of gradient pens for a tail of ``seg_count`` segs."""
+    pens = _recent_pen_cache.get(seg_count)
+    if pens is None:
+        shades = np.linspace(0, 255, seg_count).astype(int)
+        pens = [
+            pg.mkPen((255, int(s), int(s), 255), width=RECENT_TAIL_WIDTH)
+            for s in shades
+        ]
+        _recent_pen_cache[seg_count] = pens
+    return pens
+
+
 recent_segment_curves = []
 for _ in range(max(RECENT_FADE_POINTS - 1, 0)):
-    recent_segment_curves.append(
-        plot_xy.plot(
-            pen=pg.mkPen(
-                (255, 0, 0),
-                width=scale_line_width(3.0, RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT)
-            )
-        )
-    )
+    recent_segment_curves.append(plot_xy.plot(pen=pg.mkPen((255, 0, 0), width=RECENT_TAIL_WIDTH)))
 
 # Lower row: controls (left) and crack-event plot (right).
 lower_row_layout = QtWidgets.QHBoxLayout()
@@ -274,12 +311,7 @@ crack_plot.setLabel('bottom', 'Time (timestamp)')
 crack_plot.setLabel('left', 'mag')
 crack_plot.showGrid(x=True, y=True, alpha=0.25)
 crack_plot.setYRange(0.0, 1.0, padding=0.0)
-crack_curve = crack_plot.plot(
-    [],
-    [],
-    pen=pg.mkPen((255, 190, 140, 230), width=scale_line_width(1.0, CRACK_PLOT_LINE_WIDTH_PERCENT)),
-    connect='pairs',
-)
+crack_curve = crack_plot.plot([], [], pen=CRACK_PEN, connect='pairs')
 
 crack_left_axis.setToolTip("Click y-axis to toggle between mag and crack_size")
 
@@ -866,15 +898,18 @@ serial_send_button.clicked.connect(send_serial_command)
 serial_command_input.returnPressed.connect(send_serial_command)
 
 
+# Timestamp of the last 3D mesh rebuild, used to throttle it inside update().
+_last_surface_update = 0.0
+
+
 def update():
     """Timer callback: read serial, recompute readouts, and redraw all plots."""
+    global _last_surface_update
     read_serial()
     readout_label.setText(state.readout_text)
 
-    # Re-apply user-configured line widths each frame so style changes never
-    # get lost if any item reinitializes internal pen/GL options.
-    xy_curve.setPen(pg.mkPen('r', width=scale_line_width(1.0, RIGHT_PLOT_MAIN_LINE_WIDTH_PERCENT)))
-    crack_curve.setPen(pg.mkPen((255, 190, 140, 230), width=scale_line_width(1.0, CRACK_PLOT_LINE_WIDTH_PERCENT)))
+    # Pens are built once at construction (XY_MAIN_PEN / CRACK_PEN) and never
+    # change at runtime, so there's no need to rebuild them here every frame.
 
     x_all = np.array(state.timestamps)
     y1_all = np.array(state.sensor1)
@@ -952,18 +987,24 @@ def update():
     if len(x_plot) == 0:
         return
 
-    surface_data = build_surface_data(x_plot, y1_plot, y2_plot)
-    if surface_data is not None:
-        vertices, faces, face_colors, line_pos = surface_data
-        meshdata = gl.MeshData(vertexes=vertices, faces=faces)
-        meshdata.setFaceColors(face_colors)
-        surface_item.setMeshData(meshdata=meshdata)
-        surface_trace.setData(
-            pos=line_pos,
-            width=scale_line_width(2.0, SURFACE_TRACE_LINE_WIDTH_PERCENT),
-        )
-        surface_head.setData(pos=line_pos[-1:].copy())
-        surface_view.opts['center'] = QtGui.QVector3D(0.0, 0.0, 0.0)
+    # Rebuilding + re-uploading the ribbon mesh is the heaviest per-frame cost,
+    # so throttle it to ~10 Hz.  The fast 2D plots below still refresh every read
+    # tick, so the live trace stays responsive while the 3D view updates slightly
+    # less often (imperceptible for a rotating surface).
+    if now - _last_surface_update >= SURFACE_UPDATE_INTERVAL_SEC:
+        surface_data = build_surface_data(x_plot, y1_plot, y2_plot)
+        if surface_data is not None:
+            vertices, faces, face_colors, line_pos = surface_data
+            meshdata = gl.MeshData(vertexes=vertices, faces=faces)
+            meshdata.setFaceColors(face_colors)
+            surface_item.setMeshData(meshdata=meshdata)
+            surface_trace.setData(
+                pos=line_pos,
+                width=scale_line_width(2.0, SURFACE_TRACE_LINE_WIDTH_PERCENT),
+            )
+            surface_head.setData(pos=line_pos[-1:].copy())
+            surface_view.opts['center'] = QtGui.QVector3D(0.0, 0.0, 0.0)
+        _last_surface_update = now
 
     # Clear previous text labels on the XY plot.
     for item in plot_xy.items[:]:
@@ -996,6 +1037,10 @@ def update():
         crack_plot.setXLink(None)
         crack_plot.setXRange(t_min, max(t_now, t_min + 1e-6), padding=0.0)
 
+    # Clip/downsample are only valid when x is monotonic (time); disable them in
+    # phase-space mode, where non-monotonic R_p on x would otherwise alias.
+    set_xy_fast_draw(right_uses_time_x)
+
     xy_curve.setData(x_right, y_right)
 
     # Highlight most recent trajectory with red -> white segment gradient.
@@ -1004,15 +1049,10 @@ def update():
         tail_x = x_right[-tail_count:]
         tail_y = y_right[-tail_count:]
         seg_count = tail_count - 1
-        shades = np.linspace(0, 255, seg_count).astype(int)
+        tail_pens = _recent_tail_pens(seg_count)
         for i in range(seg_count):
             seg_curve = recent_segment_curves[i]
-            seg_curve.setPen(
-                pg.mkPen(
-                    (255, int(shades[i]), int(shades[i]), 255),
-                    width=scale_line_width(3.0, RIGHT_PLOT_RECENT_LINE_WIDTH_PERCENT)
-                )
-            )
+            seg_curve.setPen(tail_pens[i])
             seg_curve.setData([tail_x[i], tail_x[i + 1]], [tail_y[i], tail_y[i + 1]])
         for i in range(seg_count, len(recent_segment_curves)):
             recent_segment_curves[i].setData([], [])

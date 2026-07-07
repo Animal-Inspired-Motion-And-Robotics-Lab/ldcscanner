@@ -59,6 +59,9 @@ def build_surface_data(x_vals, rp_vals, l_vals):
     n = len(x_recent)
 
     # Build a ribbon "curtain" mesh between the live trace and a floor plane.
+    # Everything below is fully vectorized: these arrays are rebuilt on every
+    # redraw frame, so per-point Python loops here are what make the GUI lag as
+    # the buffers fill — numpy keeps the cost flat regardless of point count.
     vertices = np.empty((2 * n, 3), dtype=np.float32)
     vertices[0::2, 0] = x_norm
     vertices[0::2, 1] = y_norm
@@ -67,22 +70,32 @@ def build_surface_data(x_vals, rp_vals, l_vals):
     vertices[1::2, 1] = y_norm
     vertices[1::2, 2] = z_norm
 
+    # Two triangles per quad: [b,b+1,b+2] and [b+1,b+3,b+2] with b = 2*i.
+    b = (2 * np.arange(n - 1, dtype=np.uint32))
     faces = np.empty((2 * (n - 1), 3), dtype=np.uint32)
-    for i in range(n - 1):
-        b = 2 * i
-        faces[2 * i] = [b, b + 1, b + 2]
-        faces[2 * i + 1] = [b + 1, b + 3, b + 2]
+    faces[0::2, 0] = b
+    faces[0::2, 1] = b + 1
+    faces[0::2, 2] = b + 2
+    faces[1::2, 0] = b + 1
+    faces[1::2, 1] = b + 3
+    faces[1::2, 2] = b + 2
 
     z_color = z_norm + 0.5
 
+    # Per-quad colour interpolates the two edge z-colours, then both triangles
+    # of the quad share it.
+    c = 0.5 * (z_color[:-1] + z_color[1:])
+    r = 0.1 + 0.9 * c
+    g = 0.5 * (1.0 - c)
+    bcol = 1.0 - 0.8 * c
     face_colors = np.empty((faces.shape[0], 4), dtype=np.float32)
-    for i in range(n - 1):
-        c = float(0.5 * (z_color[i] + z_color[i + 1]))
-        r = 0.1 + 0.9 * c
-        g = 0.5 * (1.0 - c)
-        b = 1.0 - 0.8 * c
-        face_colors[2 * i] = [r, g, b, 0.32]
-        face_colors[2 * i + 1] = [r, g, b, 0.32]
+    face_colors[0::2, 0] = r
+    face_colors[1::2, 0] = r
+    face_colors[0::2, 1] = g
+    face_colors[1::2, 1] = g
+    face_colors[0::2, 2] = bcol
+    face_colors[1::2, 2] = bcol
+    face_colors[:, 3] = 0.32
 
     line_pos = np.column_stack((x_norm, y_norm, z_norm)).astype(np.float32)
     return vertices, faces, face_colors, line_pos
