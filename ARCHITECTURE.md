@@ -77,6 +77,18 @@ Key points:
 - `update()` caches the exact plotted window into `state.snap_*` so a Snapshot
   reproduces what's on screen.
 
+Render cadence (why it stays smooth as the buffers fill — see §7):
+- Serial is drained and the cheap 2D plots refresh on **every** 50 ms tick, but
+  the heavy 3D ribbon-mesh rebuild is throttled to `SURFACE_UPDATE_INTERVAL_SEC`
+  (~10 Hz) so the GPU re-upload doesn't dominate the frame.
+- `build_surface_data` is fully vectorized (no per-point Python loops), so its
+  cost stays flat regardless of how many points are buffered.
+- Clip-to-view + peak downsampling thin the main phase-space curve, but **only in
+  time mode** — `set_xy_fast_draw()` disables them in Phase Space mode, where the
+  non-monotonic R_p x-axis would otherwise alias into sawtooth artifacts.
+- Pens (main / crack / the red→white fade tail) are built once and reused, never
+  reconstructed per frame.
+
 ---
 
 ## 3. Live vs. replay: the `source` pointer
@@ -159,6 +171,10 @@ the PDF (the live view is OpenGL); the three 2D panels are true vector.
 
 - **Tune a constant** (buffer size, replay speed, fade length, response limits):
   `scanner/config.py`.
+- **Tune render smoothness**: `MAX_POINTS` (points retained/redrawn) and
+  `SURFACE_UPDATE_INTERVAL_SEC` (3D mesh rebuild rate) in `scanner/config.py`;
+  the per-mode clip/downsample toggle is `set_xy_fast_draw()` in the entry file.
+  See §7 for the full picture.
 - **Adjust plot line widths**: the `*_LINE_WIDTH_PERCENT` values in
   `scanner/config.py` (100 = original width).
 - **Support a new serial field / message format**: `parse_serial_line` /
@@ -175,4 +191,22 @@ the PDF (the live view is OpenGL); the three 2D panels are true vector.
   list.
 - **Add a widget / control**: §8 of the entry file (widget construction), then
   wire its handler in §9.
-```
+
+---
+
+## 7. Rendering performance
+
+The buffers are ring-bounded at `MAX_POINTS` (5000), but redrawing every point on
+every 50 ms tick still gets heavy as they fill. Four measures keep the GUI smooth
+without dropping serial data or CSV logging (which stay at the full 50 ms rate):
+
+| Measure | Where | Why |
+|---|---|---|
+| **Vectorized mesh build** | `build_surface_data` (`scanner/surface.py`) | The ribbon faces/colors are built with numpy, not per-point Python loops — the old loops made the redraw cost grow with the point count. |
+| **Throttled 3D rebuild** | `update()` + `SURFACE_UPDATE_INTERVAL_SEC` | Re-uploading the GL mesh to the GPU is the heaviest op; it runs ~10 Hz while the 2D plots and readouts stay at ~20 Hz. |
+| **Per-mode clip/downsample** | `set_xy_fast_draw()` (entry file) | Clip-to-view + peak downsampling thin the main curve, but only in **time mode**. pyqtgraph assumes monotonic x, so they're disabled in Phase Space mode (x = R_p) to avoid sawtooth aliasing. |
+| **Cached pens** | `XY_MAIN_PEN` / `CRACK_PEN` / `_recent_tail_pens()` | Pens are built once, not reconstructed per frame (the fade tail alone was up to ~100 `mkPen` calls per frame). |
+
+If it still isn't smooth on a given machine, the first lever is lowering
+`MAX_POINTS` (fewer points retained and redrawn); the second is raising
+`SURFACE_UPDATE_INTERVAL_SEC` (slower 3D refresh). Both are in `scanner/config.py`.
