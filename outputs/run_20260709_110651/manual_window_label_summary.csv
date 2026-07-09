@@ -1,0 +1,19 @@
+file,manual_label,count
+speed150_delay10.csv,Crack 1,2
+speed150_delay10.csv,Crack 2,2
+speed150_delay10.csv,Crack 3,2
+speed150_delay5.csv,Crack 1,2
+speed150_delay5.csv,Crack 2,2
+speed150_delay5.csv,Crack 3,2
+speed200_delay10.csv,Crack 1,2
+speed200_delay10.csv,Crack 2,2
+speed200_delay10.csv,Crack 3,2
+speed200_delay5.csv,Crack 1,2
+speed200_delay5.csv,Crack 2,2
+speed200_delay5.csv,Crack 3,2
+speed250_delay10.csv,Crack 1,2
+speed250_delay10.csv,Crack 2,2
+speed250_delay10.csv,Crack 3,2
+speed250_delay5.csv,Crack 1,2
+speed250_delay5.csv,Crack 2,2
+speed250_delay5.csv,Crack 3,2
